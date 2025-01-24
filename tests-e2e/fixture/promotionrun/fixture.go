@@ -8,11 +8,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	matcher "github.com/onsi/gomega/types"
-	appstudiosharedv1 "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	appstudiosharedv1 "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	k8sFixture "github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture/k8s"
 )
 
@@ -20,7 +20,7 @@ func HaveStatusComplete(expectedPromotionRunStatus appstudiosharedv1.PromotionRu
 	return WithTransform(func(promotionRun appstudiosharedv1.PromotionRun) bool {
 
 		config, err := fixture.GetE2ETestUserWorkspaceKubeConfig()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		k8sClient, err := fixture.GetKubeClient(config)
 		if err != nil {
@@ -35,7 +35,7 @@ func HaveStatusComplete(expectedPromotionRunStatus appstudiosharedv1.PromotionRu
 		}
 
 		// Set same time in both objects to avoid comparison failure due to time.
-		now := v1.Now()
+		now := metav1.Now()
 		promotionRun.Status.PromotionStartTime = now
 		expectedPromotionRunStatus.PromotionStartTime = now
 
@@ -61,7 +61,7 @@ func HaveStatusConditions(expectedPromotionRunStatusConditions appstudiosharedv1
 	return WithTransform(func(promotionRun appstudiosharedv1.PromotionRun) bool {
 
 		config, err := fixture.GetE2ETestUserWorkspaceKubeConfig()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		k8sClient, err := fixture.GetKubeClient(config)
 		if err != nil {
@@ -76,7 +76,7 @@ func HaveStatusConditions(expectedPromotionRunStatusConditions appstudiosharedv1
 		}
 
 		// Set same time in both objects to avoid comparison failure due to time.
-		now := v1.Now()
+		now := metav1.Now()
 		promotionRun.Status.Conditions[0].LastProbeTime = now
 		promotionRun.Status.Conditions[0].LastTransitionTime = &now
 
@@ -89,4 +89,22 @@ func HaveStatusConditions(expectedPromotionRunStatusConditions appstudiosharedv1
 
 		return res
 	}, BeTrue())
+}
+
+func BuildPromotionRunResource(name, appName, snapshotName, targetEnvironment string) appstudiosharedv1.PromotionRun {
+
+	promotionRun := appstudiosharedv1.PromotionRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: fixture.GitOpsServiceE2ENamespace,
+		},
+		Spec: appstudiosharedv1.PromotionRunSpec{
+			Snapshot:    snapshotName,
+			Application: appName,
+			ManualPromotion: appstudiosharedv1.ManualPromotionConfiguration{
+				TargetEnvironment: targetEnvironment,
+			},
+		},
+	}
+	return promotionRun
 }

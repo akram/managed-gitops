@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Run make fmt and then 'git diff' to see if anything changed: to fix this check, run make fmt and then commit the changes."
@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Install dupimport"
@@ -51,10 +51,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/appstudio-controller
           go vet -vettool=`which dupimport` ./...
-      - name: "Ensure 'appstudio-shared' has no duplicate imports"
-        run: |
-          cd $GITHUB_WORKSPACE/appstudio-shared
-          go vet -vettool=`which dupimport` ./...
 
   gosec:
     name: Ensure that code passes gosec and golint
@@ -62,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Install gosec"
@@ -85,14 +81,9 @@ jobs:
           cd $GITHUB_WORKSPACE/appstudio-controller
           make gosec
 
-      - name: "Ensure 'appstudio-shared' passes 'go-sec' - run 'make gosec' to identify issues"
-        run: |
-          cd $GITHUB_WORKSPACE/appstudio-shared
-          make gosec
-
       - name: "Ensure 'backend' passes 'go-lint' - run 'make lint' to identify issues"
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.50.1
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.60.3
           cd $GITHUB_WORKSPACE/backend
           make lint 
 
@@ -116,11 +107,6 @@ jobs:
           cd $GITHUB_WORKSPACE/appstudio-controller
           make lint 
 
-      - name: "Ensure 'appstudio-shared' passes 'go-lint' - run 'make lint' to identify issues"
-        run: |
-          cd $GITHUB_WORKSPACE/appstudio-shared
-          make lint 
-
       - name: "Ensure 'db-migration' passes 'go-lint' - run 'make lint' to identify issues"
         run: |
           cd $GITHUB_WORKSPACE/utilities/db-migration
@@ -132,9 +118,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
 
@@ -177,25 +163,51 @@ jobs:
           cd $GITHUB_WORKSPACE/appstudio-controller
           go mod tidy
           git diff --exit-code -- .
+  
+  db-migration-tests:
+    name: Run db-migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Golang
+        uses: actions/setup-go@v5.3.0
+        with:
+          go-version-file: './backend/go.mod'
+      
+      - name: "Start PostgreSQL"
+        run: |
+          cd $GITHUB_WORKSPACE
+          ./create-dev-env.sh
 
-      - name: "Appstudio-shared: Download all Go modules"
+      - name: "Migrate database to version x"
         run: |
-          cd $GITHUB_WORKSPACE/appstudio-shared
-          go mod download
-      - name: "Appstudio-shared: Check for tidyness of go.mod and go.sum: run `go mod tidy` to fix"
+          cd $GITHUB_WORKSPACE/utilities/db-migration
+          go run main.go migrate_to 20
+
+      - name: "Run migration tests to add data in database"
         run: |
-          cd $GITHUB_WORKSPACE/appstudio-shared
-          go mod tidy
-          git diff --exit-code -- .
+          cd $GITHUB_WORKSPACE/utilities/db-migration/migration_test/add_test_values
+          DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go test $GITHUB_WORKSPACE/utilities/db-migration/migration_test/add_test_values -run "TestInitializeValues"
+      
+      - name: "Migrate to latest version of database"
+        run: |
+          cd $GITHUB_WORKSPACE
+          make db-migrate
+
+      - name: "Run migration tests to verify that data added is still present/valid in database"
+        run: |
+          cd $GITHUB_WORKSPACE/utilities/db-migration/migration_test/verify_test_values
+          DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go test $GITHUB_WORKSPACE/utilities/db-migration/migration_test/verify_test_values -run "TestVerifyDBValues"
 
   validate-db-migration:
     name: Check if migration schema matches with super schema.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Golang
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Install go modules for migration"
@@ -207,9 +219,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Golang
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Install go modules for migration"
@@ -221,9 +233,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Start PostgreSQL"
@@ -248,7 +260,7 @@ jobs:
           cd $GITHUB_WORKSPACE/appstudio-controller
           make test
       - name: "Send coverage results to codecov.io"
-        uses: codecov/codecov-action@v2.1.0
+        uses: codecov/codecov-action@v5.2.0
 
   manifests:
     name: "Ensure that manifests are up-to-date"
@@ -256,11 +268,32 @@ jobs:
     steps:
       - uses: actions/checkout@master
       - name: Setup Golang
-        uses: actions/setup-go@v3.2.0
+        uses: actions/setup-go@v5.3.0
         with:
           go-version-file: './backend/go.mod'
       - name: "Run 'make generate-manifests' and report any diff (to fix this if failing: run 'make clean' then 'make generate-manifests' at root, and check in changes)"
         run: |
           cd $GITHUB_WORKSPACE
           make generate-manifests
+          git diff --exit-code -- .
+  
+  mocks:
+    name: Check mocks generated are up-to-date.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Golang
+        uses: actions/setup-go@v5.3.0
+        with:
+          go-version-file: './backend/go.mod'
+      - name: "Install mockgen and mockery for generating mocks"
+        run: |
+          cd $GITHUB_WORKSPACE
+          go install github.com/golang/mock/mockgen@latest
+          go install github.com/vektra/mockery/v2@v2.45.0
+      - name: "Generate mocks"
+        run: |
+          cd $GITHUB_WORKSPACE
+          make mocks
           git diff --exit-code -- .

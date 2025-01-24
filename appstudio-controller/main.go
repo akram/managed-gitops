@@ -19,6 +19,11 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
+
+	codereadytoolchainv1alpha1 "github.com/codeready-toolchain/api/api/v1alpha1"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -29,21 +34,24 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	applicationv1alpha1 "github.com/redhat-appstudio/application-service/api/v1alpha1"
+	applicationv1alpha1 "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	gitopsdeploymentv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
 
 	appstudioredhatcomcontrollers "github.com/redhat-appstudio/managed-gitops/appstudio-controller/controllers/appstudio.redhat.com"
-	appstudioshared "github.com/redhat-appstudio/managed-gitops/appstudio-shared/apis/appstudio.redhat.com/v1alpha1"
+	"github.com/redhat-appstudio/managed-gitops/appstudio-controller/controllers/webhooks"
 
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	//+kubebuilder:scaffold:imports
 )
 
 var (
 	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	setupLog = ctrl.Log.
+			WithName(logutil.LogLogger_managed_gitops)
 )
 
 func init() {
@@ -51,7 +59,8 @@ func init() {
 	utilruntime.Must(applicationv1alpha1.AddToScheme(scheme))
 	// utilruntime.Must(managedgitopsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gitopsdeploymentv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(appstudioshared.AddToScheme(scheme))
+	utilruntime.Must(applicationv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(codereadytoolchainv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -59,20 +68,29 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
-	var apiExportName string
-	flag.StringVar(&apiExportName, "api-export-name", "gitopsrvc-appstudio-shared", "The name of the APIExport.")
+	var profilerAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8084", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8085", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	opts := zap.Options{
-		Development: true,
+	flag.StringVar(&profilerAddr, "profiler-address", ":6062", "The address for serving pprof profiles")
+
+	opts := crzap.Options{
+		TimeEncoder: zapcore.ISO8601TimeEncoder,
+		ZapOpts: []zap.Option{
+			zap.WithCaller(true),
+		},
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(crzap.New(crzap.UseFlagOptions(&opts)))
+
+	if sharedutil.IsProfilingEnabled() {
+		setupLog.Info("Starting pprof profiler server", "address", profilerAddr)
+		go sharedutil.StartProfilers(profilerAddr)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 
@@ -83,29 +101,21 @@ func main() {
 		return
 	}
 
-	options := ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: metricsAddr,
+		},
+		// Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "53746cb8.redhat.com",
-		LeaderElectionConfig:   restConfig,
-	}
-
-	mgr, err := sharedutil.GetControllerManager(ctx, restConfig, &setupLog, apiExportName, options)
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	if err = (&appstudioredhatcomcontrollers.ApplicationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Application")
-		os.Exit(1)
-	}
 	if err = (&appstudioredhatcomcontrollers.SnapshotReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -134,6 +144,39 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Environment")
 		os.Exit(1)
 	}
+
+	// If the webhook is not disabled, start listening on the webhook URL
+	if !strings.EqualFold(os.Getenv("DISABLE_APPSTUDIO_WEBHOOK"), "true") {
+
+		setupLog.Info("setting up webhooks")
+		setUpWebhooks(mgr)
+	}
+
+	if err = (&appstudioredhatcomcontrollers.DeploymentTargetClaimReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DeploymentTargetClaim")
+		os.Exit(1)
+	}
+
+	if err = (&appstudioredhatcomcontrollers.DeploymentTargetReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Clock:  sharedutil.NewClock(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DeploymentTarget")
+		os.Exit(1)
+	}
+
+	if err = (&appstudioredhatcomcontrollers.SpaceRequestReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "DevsandboxDeployment")
+		os.Exit(1)
+	}
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -148,6 +191,15 @@ func main() {
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+
+// setUpWebhooks sets up webhooks.
+func setUpWebhooks(mgr ctrl.Manager) {
+	err := webhooks.SetupWebhooks(mgr, webhooks.EnabledWebhooks...)
+	if err != nil {
+		setupLog.Error(err, "unable to setup webhooks")
 		os.Exit(1)
 	}
 }

@@ -2,11 +2,16 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -15,10 +20,25 @@ import (
 const (
 	// ArgoCDDefaultDestinationInCluster is 'in-cluster' which is the spec destination value that Argo CD recognizes
 	ArgoCDDefaultDestinationInCluster = "in-cluster"
+
+	SelfHealIntervalEnVar = "SELF_HEAL_INTERVAL" // Interval in minutes between self-healing runs
 )
 
 const (
+	//Secret label key to define secret type.
+	ArgoCDSecretTypeIdentifierKey = "argocd.argoproj.io/secret-type" // #nosec G101
+	// Secret type for Cluster Secret
+	ArgoCDSecretClusterTypeValue = "cluster" // #nosec G101
+	// Secret type for Repository Secret
+	ArgoCDSecretRepoTypeValue = "repository" // #nosec G101
+
 	ManagedEnvironmentSecretType = "managed-gitops.redhat.com/managed-environment"
+
+	RepositoryCredentialSecretType = "managed-gitops.redhat.com/repository-credential"
+
+	Log_JobKey      = "job"                    // Clean up job key
+	Log_JobKeyValue = "managed-gitops-cleanup" // Clean up job value
+	Log_JobTypeKey  = "jobType"                // Key to identify clean up job type
 )
 
 // ExponentialBackoff: the more times in a row something fails, the longer we wait.
@@ -41,7 +61,6 @@ func (e *ExponentialBackoff) IncreaseAndReturnNewDuration() time.Duration {
 	return *e.curr
 }
 
-/* #nosec */
 func (e *ExponentialBackoff) increaseDueToFail() {
 	if e.curr == nil {
 		e.curr = &e.Min
@@ -50,7 +69,7 @@ func (e *ExponentialBackoff) increaseDueToFail() {
 
 		if e.Jitter {
 			// Randomly increase the result by up to 10%, to introduce a small amount of jitter
-			newDurationVal = time.Duration(float64(newDurationVal) * (1 + (rand.Float64() * float64(0.10))))
+			newDurationVal = time.Duration(float64(newDurationVal) * (1 + (rand.Float64() * float64(0.10)))) // #nosec G404
 		}
 
 		e.curr = &newDurationVal
@@ -90,7 +109,7 @@ outer:
 		// We only return if the context was cancelled.
 		select {
 		case <-ctx.Done():
-			err = fmt.Errorf(taskDescription + ": context cancelled")
+			err = errors.New(taskDescription + ": context cancelled")
 			break outer
 		default:
 		}
@@ -115,7 +134,8 @@ outer:
 // CatchPanic calls f(), and recovers from panic if one occurs.
 func CatchPanic(f func() error) (isPanic bool, err error) {
 
-	panicLog := log.FromContext(context.Background())
+	panicLog := log.FromContext(context.Background()).
+		WithName(logutil.LogLogger_managed_gitops)
 
 	isPanic = false
 
@@ -148,4 +168,27 @@ func GetRESTConfig() (*rest.Config, error) {
 	res.QPS = 100
 	res.Burst = 250
 	return res, nil
+}
+
+func SelfHealInterval(defaultValue time.Duration, logger logr.Logger) time.Duration {
+	interval := os.Getenv(SelfHealIntervalEnVar)
+	if interval == "" {
+		return defaultValue
+	}
+	value, err := strconv.Atoi(interval)
+	if err != nil {
+		msg := fmt.Sprintf("value of env var %s can't be converted to int", SelfHealIntervalEnVar)
+		logger.Error(err, msg)
+		return defaultValue
+	}
+	return time.Duration(value) * time.Minute
+}
+
+// AppProjectIsolationEnabled is a feature flag for AppProject-based isolation. To enable it, set the environment variable on the controllers.
+func AppProjectIsolationEnabled() bool {
+
+	// If the environment variable exists, and equals (case insensitive) "true", then enable AppProject-based isolation
+	// otherwise, don't.
+
+	return strings.EqualFold(os.Getenv("ENABLE_APPPROJECT_ISOLATION"), "true")
 }

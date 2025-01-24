@@ -17,45 +17,40 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"flag"
-	"fmt"
-	"log"
-	"net/http"
 	"os"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"k8s.io/client-go/discovery"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/redhat-appstudio/managed-gitops/utilities/db-migration/migrate"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-
-	"github.com/go-logr/logr"
-	"github.com/redhat-appstudio/managed-gitops/utilities/db-migration/migrate"
-
-	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/config/db/util"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	managedgitopscontrollers "github.com/redhat-appstudio/managed-gitops/backend/controllers/managed-gitops"
+	"github.com/redhat-appstudio/managed-gitops/backend/eventloop"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/preprocess_event_loop"
-	"github.com/redhat-appstudio/managed-gitops/backend/routes"
+	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/shared_resource_loop"
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	//+kubebuilder:scaffold:imports
 )
 
 var (
 	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	setupLog = ctrl.Log.WithName(logutil.LogLogger_managed_gitops)
 )
 
 func init() {
@@ -69,20 +64,30 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
-	var apiExportName string
-	flag.StringVar(&apiExportName, "api-export-name", "gitopsrvc-backend-shared", "The name of the APIExport.")
+	var profilerAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":18080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":18081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	opts := zap.Options{
-		Development: true,
+	flag.StringVar(&profilerAddr, "profiler-address", ":6060", "The address for serving pprof profiles")
+
+	opts := crzap.Options{
+		TimeEncoder: zapcore.ISO8601TimeEncoder,
+		ZapOpts: []zap.Option{
+			zap.WithCaller(true),
+		},
 	}
+
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(crzap.New(crzap.UseFlagOptions(&opts)))
+
+	if sharedutil.IsProfilingEnabled() {
+		setupLog.Info("Starting pprof profiler server", "address", profilerAddr)
+		go sharedutil.StartProfilers(profilerAddr)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 
@@ -99,7 +104,6 @@ func main() {
 		setupLog.Error(err, "Fatal Error: Unsuccessful Migration")
 		os.Exit(1)
 	}
-	go initializeRoutes()
 
 	restConfig, err := sharedutil.GetRESTConfig()
 	if err != nil {
@@ -108,17 +112,15 @@ func main() {
 		return
 	}
 
-	options := ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: metricsAddr,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "5a3f596c.redhat.com",
-		LeaderElectionConfig:   restConfig,
-	}
-
-	mgr, err := sharedutil.GetControllerManager(ctx, restConfig, &setupLog, apiExportName, options)
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -158,7 +160,38 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "GitOpsDeploymentManagedEnvironment")
 		os.Exit(1)
 	}
+
+	// If the webhook is not disabled, start listening on the webhook URL
+	if !strings.EqualFold(os.Getenv("DISABLE_APPSTUDIO_WEBHOOK"), "true") {
+
+		setupLog.Info("setting up webhooks")
+
+		if err = (&managedgitopsv1alpha1.GitOpsDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "GitOpsDeployment")
+			os.Exit(1)
+		}
+		if err = (&managedgitopsv1alpha1.GitOpsDeploymentRepositoryCredential{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "GitOpsDeploymentRepositoryCredential")
+			os.Exit(1)
+		}
+		if err = (&managedgitopsv1alpha1.GitOpsDeploymentSyncRun{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "GitOpsDeploymentSyncRun")
+			os.Exit(1)
+		}
+		if err = (&managedgitopsv1alpha1.GitOpsDeploymentManagedEnvironment{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "GitOpsDeploymentManagedEnvironment")
+			os.Exit(1)
+		}
+
+	}
+
 	//+kubebuilder:scaffold:builder
+
+	startDBReconciler(mgr)
+	startRepoCredReconciler(mgr)
+	startDBMetricsReconciler(mgr)
+
+	startClusterReconciler(mgr)
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
@@ -182,81 +215,65 @@ func main() {
 
 }
 
-func initializeRoutes() {
-
-	// Intializing the server for routing endpoints
-	router := routes.RouteInit()
-	err := router.ListenAndServe()
-	if err != http.ErrServerClosed {
-		log.Println("Error on ListenAndServe:", err)
-	}
-
-}
-
-// nolint
-// createPrimaryGitOpsEngineInstance create placeholder values, for development purposes. This should not be used in production.
-func createPrimaryGitOpsEngineInstance(k8sclient client.Client, log logr.Logger) error {
-
-	ctx := context.Background()
+func startDBReconciler(mgr ctrl.Manager) {
 
 	dbQueries, err := db.NewSharedProductionPostgresDBQueries(false)
 	if err != nil {
-		return err
+		setupLog.Error(err, "never able to connect to database")
+		os.Exit(1)
 	}
 
-	// Create the fake cluster user if they don't exist
-	clusterUser := db.ClusterUser{User_name: "gitops-service-user"}
-	if err := dbQueries.GetClusterUserByUsername(ctx, &clusterUser); err != nil {
-		if db.IsResultNotFoundError(err) {
-			if err = dbQueries.CreateClusterUser(ctx, &clusterUser); err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+	databaseReconciler := eventloop.DatabaseReconciler{
+		DB:               dbQueries,
+		Client:           mgr.GetClient(),
+		K8sClientFactory: shared_resource_loop.DefaultK8sClientFactory{},
 	}
 
-	namespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "argocd",
-		},
-	}
-	if err := k8sclient.Get(ctx, client.ObjectKeyFromObject(namespace), namespace); err != nil {
-		return fmt.Errorf("unable to retrieve gitopsengine namespace: %v", err)
-	}
+	// Start goroutine for database reconciler
+	databaseReconciler.StartDatabaseReconciler()
+}
 
-	kubeSystemNamespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "kube-system",
-		},
-	}
+func startRepoCredReconciler(mgr ctrl.Manager) {
 
-	gitopsEngineInstance, _, _, err := dbutil.GetOrCreateGitopsEngineInstanceByInstanceNamespaceUID(ctx, *namespace, kubeSystemNamespace.Name, dbQueries, log)
+	dbQueries, err := db.NewSharedProductionPostgresDBQueries(false)
 	if err != nil {
-		return err
+		setupLog.Error(err, "never able to connect to database")
+		os.Exit(1)
 	}
 
-	gitopsLocalWorkspaceNamespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gitops-local",
-		},
+	repoCredReconciler := eventloop.RepoCredReconciler{
+		DB:     dbQueries,
+		Client: mgr.GetClient(),
 	}
 
-	managedEnv, _, err := dbutil.GetOrCreateManagedEnvironmentByNamespaceUID(ctx, *gitopsLocalWorkspaceNamespace, dbQueries, log)
+	// Start goroutine for Repository Credential reconciler
+	repoCredReconciler.StartRepoCredReconciler()
+}
+
+func startDBMetricsReconciler(mgr ctrl.Manager) {
+
+	dbQueries, err := db.NewSharedProductionPostgresDBQueries(false)
 	if err != nil {
-		return err
+		setupLog.Error(err, "never able to connect to database")
+		os.Exit(1)
 	}
 
-	clusterAccess := &db.ClusterAccess{
-		Clusteraccess_user_id:                   clusterUser.Clusteruser_id,
-		Clusteraccess_managed_environment_id:    managedEnv.Managedenvironment_id,
-		Clusteraccess_gitops_engine_instance_id: gitopsEngineInstance.Gitopsengineinstance_id,
+	databaseReconciler := eventloop.MetricsReconciler{
+		DB:     dbQueries,
+		Client: mgr.GetClient(),
 	}
 
-	if err := dbQueries.CreateClusterAccess(ctx, clusterAccess); err != nil {
-		return err
+	// Start goroutine for database metrics reconciler
+	databaseReconciler.StartDBMetricsReconcilerForMetrics()
+}
+
+func startClusterReconciler(mgr ctrl.Manager) {
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "failed to create discovery client")
+		os.Exit(1)
 	}
+	reconciler := eventloop.NewClusterReconciler(mgr.GetClient(), discoveryClient)
 
-	return nil
-
+	reconciler.Start()
 }

@@ -20,6 +20,8 @@ import (
 	"flag"
 	"os"
 
+	codereadytoolchainv1alpha1 "github.com/codeready-toolchain/api/api/v1alpha1"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 
@@ -31,8 +33,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	applicationv1alpha1 "github.com/redhat-appstudio/application-service/api/v1alpha1"
+	applicationv1alpha1 "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	gitopsdeploymentv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
 
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
@@ -51,6 +54,7 @@ func init() {
 	utilruntime.Must(applicationv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gitopsdeploymentv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(appv1.AddToScheme(scheme))
+	utilruntime.Must(codereadytoolchainv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -79,9 +83,12 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: metricsAddr,
+		},
+		// MetricsBindAddress:     ,
+		// Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "53746cb8.redhat.com",

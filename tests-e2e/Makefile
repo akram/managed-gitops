@@ -32,9 +32,8 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: test
-test: # Run tests.
-	go test -v -p=1 -timeout=60m -race -count=1 -coverprofile=coverage.out ./...
-	
+test: ## Run E2E tests.
+	ENABLE_APPPROJECT_ISOLATION="true" DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go test -v -p=1 -timeout=100m -race -count=1 -coverprofile=coverage.out ./...
 
 # go-get-tool will 'go install' any package $2 and install it to $1.
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -50,22 +49,26 @@ rm -rf $$TMP_DIR ;\
 }
 endef
 
+.PHONY: lint
+lint: ## Run lint checks for the test code
+	golangci-lint --version
+	GOMAXPROCS=2 golangci-lint run --fix --verbose --timeout 300s
+
 GO_SEC = $(shell pwd)/bin/gosec
 go_sec: ## Download gosec locally if necessary.
 	$(call go-get-tool,$(GO_SEC),github.com/securego/gosec/v2/cmd/gosec@latest)
 
-.PHONY: lint
-lint:
-	golangci-lint --version
-	GOMAXPROCS=2 golangci-lint run --fix --verbose --timeout 300s
-
 .PHONY: gosec
-gosec: go_sec 
+gosec: go_sec ## Run the gosec tool
 	# Run this command, to install gosec, if not installed:
 	# go install github.com/securego/gosec/v2/cmd/gosec@latest
 	$(GO_SEC) ./...
 
 # Remove the vendor and bin folders
 .PHONY: clean
-clean:
-	rm -rf vendor/ bin/
+clean: ## Remove the vendor and bin folders
+	rm -rf vendor/ bin/ coverage.out
+
+#required for test execution from OpenShift CI
+test-backward-compatibility:
+	go test ./core -v -ginkgo.focus "GitOpsDeployment Managed Environment E2E tests Create a new GitOpsDeployment targeting a ManagedEnvironment should be healthy and have synced status, and resources should be deployed, when deployed with a ManagedEnv"

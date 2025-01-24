@@ -6,7 +6,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	// . "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +17,7 @@ import (
 // - Wait for the ServiceAccountToken Secret to be created
 // - Next, add a fake token to the secret
 // - Finally, add a reference to the Secret to the ServiceAccount
+// This is for unit test purposes only.
 func StartServiceAccountListenerOnFakeClient(ctx context.Context, managedEnvironmentUID string, k8sClient client.Client) {
 
 	addSecretToServiceAccount := func(secret corev1.Secret) {
@@ -26,7 +27,7 @@ func StartServiceAccountListenerOnFakeClient(ctx context.Context, managedEnviron
 			"token": ([]byte)("token"),
 		}
 		err := k8sClient.Update(ctx, &secret)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		// Locate the ServiceAccount that is pointed to by the Secret, and update that ServiceAccount
 		// - Add the Secret to the list of token secrets in the Service account
@@ -42,7 +43,7 @@ func StartServiceAccountListenerOnFakeClient(ctx context.Context, managedEnviron
 				},
 			}
 			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(&serviceAccount), &serviceAccount)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			serviceAccount.Secrets = append(serviceAccount.Secrets, corev1.ObjectReference{
 				Name:      secret.Name,
@@ -50,22 +51,24 @@ func StartServiceAccountListenerOnFakeClient(ctx context.Context, managedEnviron
 			})
 
 			err = k8sClient.Update(ctx, &serviceAccount)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 		}
 	}
 
 	go func() {
 
+		defer GinkgoRecover()
+
 		// Wait for the ServiceAccountToken Secret to be created
 		// Then:
 		// - add a fake token to the secret
 		// - add a reference to the Secret to the ServiceAccount
-		err := wait.Poll(time.Second*1, time.Hour*1, func() (bool, error) {
+		err := wait.PollUntilContextTimeout(context.Background(), time.Second*1, time.Hour*1, true, func(ctx context.Context) (bool, error) {
 
 			secretList := corev1.SecretList{}
 			err := k8sClient.List(ctx, &secretList, &client.ListOptions{Namespace: "kube-system"})
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			for idx := range secretList.Items {
 
@@ -84,7 +87,7 @@ func StartServiceAccountListenerOnFakeClient(ctx context.Context, managedEnviron
 
 			return false, nil
 		})
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 	}()
 }

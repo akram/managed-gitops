@@ -17,8 +17,9 @@ import (
 
 	appv1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	operation "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/config/db/util"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/db/util"
+	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
 	argosharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/argocd"
 	"github.com/redhat-appstudio/managed-gitops/backend-shared/util/tests"
 	"github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers"
@@ -26,9 +27,10 @@ import (
 
 var _ = Describe("Managed Environment Operation Tests", func() {
 	const (
-		operationName      = "operation"
-		operationNamespace = "argocd"
+		operationName = "operation"
 	)
+	var operationNamespace = dbutil.GetGitOpsEngineSingleInstanceNamespace()
+
 	Context("Reconciling Operation CRs pointing to Managed Environments", func() {
 
 		var ctx context.Context
@@ -55,16 +57,16 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			dbQueries, err = db.NewUnsafePostgresDBQueries(true, true)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = db.SetupForTestingDBGinkgo()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			scheme, argocdNamespace, kubesystemNamespace, workspace, err = tests.GenericTestSetup()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = appv1.AddToScheme(scheme)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("Initialize fake kube client")
 			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, argocdNamespace, kubesystemNamespace).Build()
@@ -79,7 +81,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 
 			gitopsEngineCluster, _, err = dbutil.GetOrCreateGitopsEngineClusterByKubeSystemNamespaceUID(ctx, string(kubesystemNamespace.UID), dbQueries, logger)
 			Expect(gitopsEngineCluster).ToNot(BeNil())
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating a gitops engine instance")
 			gitopsEngineInstance = &db.GitopsEngineInstance{
@@ -89,7 +91,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				EngineCluster_id:        gitopsEngineCluster.Gitopsenginecluster_id,
 			}
 			err = dbQueries.CreateGitopsEngineInstance(ctx, gitopsEngineInstance)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 		})
 
@@ -100,7 +102,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateClusterCredentials(ctx, &clusterCredentials)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			managedEnvRow := db.ManagedEnvironment{
 				Managedenvironment_id: "test-fake-managed-env",
@@ -109,7 +111,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateManagedEnvironment(ctx, &managedEnvRow)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation row pointing to ManagedEnvironment")
 			operationDB := &db.Operation{
@@ -122,7 +124,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateOperation(ctx, operationDB, operationDB.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation CR pointing to Operation row")
 			operationCR := &operation.Operation{
@@ -135,7 +137,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, operationCR)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating an Argo CD Cluster secret, which we will will test to make sure it has not been deleted.")
 			clusterSecretName := argosharedutil.GenerateArgoCDClusterSecretName(db.ManagedEnvironment{Managedenvironment_id: managedEnvRow.Managedenvironment_id})
@@ -144,7 +146,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 					Name:      clusterSecretName,
 					Namespace: argocdNamespace.Name,
 					Labels: map[string]string{
-						ArgoCDSecretTypeKey:                            ArgoCDSecretTypeValue_ClusterSecret,
+						sharedutil.ArgoCDSecretTypeIdentifierKey:       sharedutil.ArgoCDSecretClusterTypeValue,
 						controllers.ArgoCDClusterSecretDatabaseIDLabel: managedEnvRow.Managedenvironment_id,
 					},
 				},
@@ -152,14 +154,14 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = task.event.client.Create(ctx, secret)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			retry, err := task.PerformTask(ctx)
-			Expect(err).ToNot(BeNil(), "an error is expected here, because an operation on a managedenvironment is only supported if the managed environment doesn't exist")
+			Expect(err).To(HaveOccurred(), "an error is expected here, because an operation on a managedenvironment is only supported if the managed environment doesn't exist")
 			Expect(retry).To(BeFalse())
 
 			err = task.event.client.Get(ctx, client.ObjectKeyFromObject(secret), secret)
-			Expect(err).To(BeNil(), "the Argo CD cluster secret should not have been deleted.")
+			Expect(err).ToNot(HaveOccurred(), "the Argo CD cluster secret should not have been deleted.")
 
 		})
 
@@ -181,7 +183,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateOperation(ctx, operationDB, operationDB.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation CR")
 			operationCR := &operation.Operation{
@@ -194,7 +196,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, operationCR)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating an Argo CD Cluster secret, which we will will test to make sure it is deleted")
 			clusterSecretName := argosharedutil.GenerateArgoCDClusterSecretName(db.ManagedEnvironment{Managedenvironment_id: deletedManagedEnvId})
@@ -203,7 +205,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 					Name:      clusterSecretName,
 					Namespace: argocdNamespace.Name,
 					Labels: map[string]string{
-						ArgoCDSecretTypeKey:                            ArgoCDSecretTypeValue_ClusterSecret,
+						sharedutil.ArgoCDSecretTypeIdentifierKey:       sharedutil.ArgoCDSecretClusterTypeValue,
 						controllers.ArgoCDClusterSecretDatabaseIDLabel: deletedManagedEnvId,
 					},
 				},
@@ -211,17 +213,17 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = task.event.client.Create(ctx, secret)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			retry, err := task.PerformTask(ctx)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(retry).To(BeFalse())
 
 			err = task.event.client.Get(ctx, client.ObjectKeyFromObject(secret), secret)
 			Expect(apierr.IsNotFound(err)).To(BeTrue(), "the Argo CD cluster secret should have been deleted.")
 
 			err = expectOperationIsComplete(ctx, operationDB.Operation_id, dbQueries)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
@@ -251,16 +253,16 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			dbQueries, err = db.NewUnsafePostgresDBQueries(true, true)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = db.SetupForTestingDBGinkgo()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			scheme, argocdNamespace, kubesystemNamespace, workspace, err = tests.GenericTestSetup()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = appv1.AddToScheme(scheme)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("Initialize fake kube client")
 			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(workspace, argocdNamespace, kubesystemNamespace).Build()
@@ -275,7 +277,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 
 			gitopsEngineCluster, _, err = dbutil.GetOrCreateGitopsEngineClusterByKubeSystemNamespaceUID(ctx, string(kubesystemNamespace.UID), dbQueries, logger)
 			Expect(gitopsEngineCluster).ToNot(BeNil())
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating a gitops engine instance")
 			gitopsEngineInstance = &db.GitopsEngineInstance{
@@ -285,7 +287,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				EngineCluster_id:        gitopsEngineCluster.Gitopsenginecluster_id,
 			}
 			err = dbQueries.CreateGitopsEngineInstance(ctx, gitopsEngineInstance)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 		})
 
@@ -297,7 +299,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateClusterCredentials(ctx, &clusterCredentials)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			managedEnvironmentDB := db.ManagedEnvironment{
 				Managedenvironment_id: "test-managed-env",
@@ -305,7 +307,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Clustercredentials_id: clusterCredentials.Clustercredentials_cred_id,
 			}
 			err = dbQueries.CreateManagedEnvironment(ctx, &managedEnvironmentDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			applicationDB := db.Application{
 				Application_id:          "test-application",
@@ -315,7 +317,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Managed_environment_id:  managedEnvironmentDB.Managedenvironment_id,
 			}
 			err = dbQueries.CreateApplication(ctx, &applicationDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation row in database, pointing to Application")
 			operationDB := &db.Operation{
@@ -326,7 +328,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Operation_owner_user_id: testClusterUser.Clusteruser_id,
 			}
 			err = dbQueries.CreateOperation(ctx, operationDB, operationDB.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation CR, pointing to Operation row")
 			operationCR := &operation.Operation{
@@ -339,10 +341,10 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, operationCR)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			retry, err := task.PerformTask(ctx)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(retry).To(BeFalse())
 
 			clusterSecretName := argosharedutil.GenerateArgoCDClusterSecretName(db.ManagedEnvironment{Managedenvironment_id: managedEnvironmentDB.Managedenvironment_id})
@@ -353,10 +355,10 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Get(ctx, client.ObjectKeyFromObject(secret), secret)
-			Expect(err).To(BeNil(), "The Argo CD Cluster secret for the managed environment should exist")
+			Expect(err).ToNot(HaveOccurred(), "The Argo CD Cluster secret for the managed environment should exist")
 
 			err = expectOperationIsComplete(ctx, operationDB.Operation_id, dbQueries)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("Reconciling a application pointing to a new managed environment, to ensure the corresponding Argo CD cluster secret is created", func() {
@@ -367,7 +369,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateClusterCredentials(ctx, &clusterCredentials)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			managedEnvironmentDB := db.ManagedEnvironment{
 				Managedenvironment_id: "test-managed-env",
@@ -375,7 +377,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Clustercredentials_id: clusterCredentials.Clustercredentials_cred_id,
 			}
 			err = dbQueries.CreateManagedEnvironment(ctx, &managedEnvironmentDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			applicationDB := db.Application{
 				Application_id:          "test-application",
@@ -385,7 +387,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Managed_environment_id:  managedEnvironmentDB.Managedenvironment_id,
 			}
 			err = dbQueries.CreateApplication(ctx, &applicationDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation row in database")
 			operationDB := &db.Operation{
@@ -396,7 +398,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Operation_owner_user_id: testClusterUser.Clusteruser_id,
 			}
 			err = dbQueries.CreateOperation(ctx, operationDB, operationDB.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation CR, pointing to Operation row")
 			operationCR := &operation.Operation{
@@ -409,10 +411,10 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, operationCR)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			retry, err := task.PerformTask(ctx)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(retry).To(BeFalse())
 
 			clusterSecretName := argosharedutil.GenerateArgoCDClusterSecretName(db.ManagedEnvironment{Managedenvironment_id: managedEnvironmentDB.Managedenvironment_id})
@@ -423,10 +425,10 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Get(ctx, client.ObjectKeyFromObject(secret), secret)
-			Expect(err).To(BeNil(), "The Argo CD Cluster secret for the managed environment should exist")
+			Expect(err).ToNot(HaveOccurred(), "The Argo CD Cluster secret for the managed environment should exist")
 
 			err = expectOperationIsComplete(ctx, operationDB.Operation_id, dbQueries)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("Reconciling a application pointing to a managed environment, with an out-of-date Argo CD cluster secret, to ensure the cluster secret is updated", func() {
@@ -437,7 +439,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 			}
 
 			err = dbQueries.CreateClusterCredentials(ctx, &clusterCredentials)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			managedEnvironmentDB := db.ManagedEnvironment{
 				Managedenvironment_id: "test-managed-env",
@@ -445,7 +447,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Clustercredentials_id: clusterCredentials.Clustercredentials_cred_id,
 			}
 			err = dbQueries.CreateManagedEnvironment(ctx, &managedEnvironmentDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			applicationDB := db.Application{
 				Application_id:          "test-application",
@@ -455,7 +457,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Managed_environment_id:  managedEnvironmentDB.Managedenvironment_id,
 			}
 			err = dbQueries.CreateApplication(ctx, &applicationDB)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation row in database, pointing to Application")
 			operationDB := &db.Operation{
@@ -466,7 +468,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				Operation_owner_user_id: testClusterUser.Clusteruser_id,
 			}
 			err = dbQueries.CreateOperation(ctx, operationDB, operationDB.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating Operation CR, pointing to Operation row")
 			operationCR := &operation.Operation{
@@ -479,7 +481,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, operationCR)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("creating an Argo CD Cluster secret, with out of date contents")
 			clusterSecretName := argosharedutil.GenerateArgoCDClusterSecretName(db.ManagedEnvironment{Managedenvironment_id: managedEnvironmentDB.Managedenvironment_id})
@@ -488,7 +490,7 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 					Name:      clusterSecretName,
 					Namespace: argocdNamespace.Name,
 					Labels: map[string]string{
-						ArgoCDSecretTypeKey:                            ArgoCDSecretTypeValue_ClusterSecret,
+						sharedutil.ArgoCDSecretTypeIdentifierKey:       sharedutil.ArgoCDSecretClusterTypeValue,
 						controllers.ArgoCDClusterSecretDatabaseIDLabel: applicationDB.Managed_environment_id,
 					},
 				},
@@ -497,17 +499,17 @@ var _ = Describe("Managed Environment Operation Tests", func() {
 				},
 			}
 			err = task.event.client.Create(ctx, secret)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("calling perform task")
 			retry, err := task.PerformTask(ctx)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			Expect(retry).To(BeFalse())
 			err = expectOperationIsComplete(ctx, operationDB.Operation_id, dbQueries)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			err = task.event.client.Get(ctx, client.ObjectKeyFromObject(secret), secret)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("examining the updated secret, and ensure it has been properly reconciled.")
 			_, fieldStillExists := secret.Data["not-a-real-field"]
@@ -532,7 +534,7 @@ func expectOperationIsComplete(ctx context.Context, operationID string, dbQuerie
 		Operation_id: operationID,
 	}
 	err := dbQueries.GetOperationById(ctx, operation)
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	Expect(operation.State).To(Equal(db.OperationState_Completed))
 
 	return nil

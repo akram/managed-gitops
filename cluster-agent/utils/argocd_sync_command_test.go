@@ -50,8 +50,7 @@ var _ = Describe("ArgoCD AppSync Command", func() {
 
 				namespace := &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops",
-						Namespace: "openshift-gitops",
+						Name: "openshift-gitops",
 					},
 				}
 
@@ -60,6 +59,7 @@ var _ = Describe("ArgoCD AppSync Command", func() {
 						Name:      "openshift-gitops-cluster",
 						Namespace: "openshift-gitops",
 					},
+					Type: "Opaque",
 					Data: map[string][]byte{
 						"admin.password": []byte("a1Y4c0RvdkgxcHFPUTNJYWxSaDRubXlaZ3c3QUJGcmQ="),
 					},
@@ -80,7 +80,7 @@ var _ = Describe("ArgoCD AppSync Command", func() {
 				}
 
 				k8sClient, err = generateFakeK8sClient(namespace, loginSecret, route, app)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}
 
 			mockAppClient := &mocks.Client{}
@@ -126,7 +126,7 @@ var _ = Describe("ArgoCD AppSync Command", func() {
 
 			cs := NewCredentialService(&clientGenerator, true)
 			err = AppSync(context.Background(), appName, "master", "openshift-gitops", k8sClient, cs, true)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 })

@@ -38,7 +38,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.23
+ENVTEST_K8S_VERSION = 1.28
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -47,6 +47,18 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+# Get the OS and ARCH values to be used for building the binary.
+OS ?= $(shell go env GOOS)
+ARCH ?= $(shell go env GOARCH)
+KUBEBUILDER_ASSETS_ARCH=${ARCH}
+$(info OS is ${OS})
+$(info Arch is ${ARCH})
+ifeq (${OS},darwin)
+ifeq (${ARCH},arm64)
+  $(info Mac arm64 detected)
+  KUBEBUILDER_ASSETS_ARCH=amd64
+endif
+endif
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -93,18 +105,38 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -p=1 ./... -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) --arch=$(KUBEBUILDER_ASSETS_ARCH) use $(ENVTEST_K8S_VERSION) -p path)" go test -p=1 ./... -coverprofile cover.out
 
 ##@ Build
 
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
-	go build -o bin/manager main.go
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build -o bin/manager main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./main.go --zap-log-level info --zap-time-encoding=rfc3339nano
-# more on controller log level configuration: https://sdk.operatorframework.io/docs/building-operators/golang/references/logging/
+	DISABLE_APPSTUDIO_WEBHOOK=true go run ./main.go --zap-log-level info --zap-time-encoding=rfc3339nano
+# - more on controller log level configuration: https://sdk.operatorframework.io/docs/building-operators/golang/references/logging/
+# - we disable webhook when running locally, because K8s will not be able to connect to our local process (which is a prereq for webhook supprot)
+
+runexec: ## Run a controller from your host using exe in current folder
+ifeq (,$(wildcard ./main))
+runexec: manifests generate fmt vet
+	@echo Building and running appstudio-controller
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build ./main.go
+	DISABLE_APPSTUDIO_WEBHOOK=true ./main --zap-log-level info --zap-time-encoding=rfc3339nano
+else
+runexec:
+	@echo Running appstudio-controller using existing main executable.
+	DISABLE_APPSTUDIO_WEBHOOK=true ./main --zap-log-level info --zap-time-encoding=rfc3339nano
+endif
+
+.PHONY: chaos-run
+chaos-run: manifests generate fmt vet ## Chaos Engineering: Simulate a controller that restarts every ~33 seconds.
+	go build -o /tmp/appstudio-controller-manager-chaos main.go
+	DISABLE_APPSTUDIO_WEBHOOK=true KILL_INTERVAL="45" KILL_INITIAL="10" ../utilities/random-kill.sh /tmp/appstudio-controller-manager-chaos --zap-log-level info --zap-time-encoding=rfc3339nano
+	rm /tmp/appstudio-controller-manager-chaos
+
 
 #.PHONY: docker-build
 #docker-build: test ## Build docker image with the manager.
@@ -140,7 +172,7 @@ endif
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 .PHONY: controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.8.0)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0)
 
 KUSTOMIZE = $(shell pwd)/bin/kustomize
 .PHONY: kustomize
@@ -237,3 +269,8 @@ gosec:
 .PHONY: clean
 clean:
 	rm -rf vendor/ bin/
+
+# Remove the vendor and bin folders
+.PHONY: clean-exec
+clean-exec:
+	rm main

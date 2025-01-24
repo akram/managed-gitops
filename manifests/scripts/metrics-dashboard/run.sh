@@ -1,0 +1,157 @@
+#!/bin/bash
+
+# -----------------
+
+# Using OpenShift's Prometheus instance requires us to enable user workload monitoring via the openshift-monitoring ConfigMap:
+# https://docs.openshift.com/container-platform/4.11/monitoring/enabling-monitoring-for-user-defined-projects.html)
+# - BUT, the way I'm doing it here is a brittle hack :P
+kubectl apply -f prometheus/enable-user-workload-monitoring.yaml
+
+# Allow Prometheus process to view the openshift-operators/gitops namespaces
+kubectl apply -f prometheus/prometheus-roles-for-openshift-operators.yaml -n openshift-operators
+kubectl apply -f prometheus/prometheus-roles-for-gitops-ns.yaml -n gitops
+
+# -----------------
+echo 
+echo "* Kick off an OLM install of Grafana, and wait for it to complete"
+
+kubectl create ns grafana > /dev/null 2>&1
+
+kubectl apply -f grafana/grafana-operator-group.yaml -n grafana
+kubectl apply -f grafana/grafana-subscription.yaml -n grafana
+
+echo
+echo "* Waiting for Grafana CRDs to exist"
+
+while : ; do
+  kubectl get customresourcedefinition/grafanas.integreatly.org  > /dev/null 2>&1 && break
+  sleep 1
+done
+
+# -----------------
+
+echo "* Waiting to acquire cluster host name"
+while : ; do
+  kubectl get route/thanos-querier -n openshift-monitoring -o yaml  > /dev/null 2>&1 && break
+  sleep 1
+done
+
+# We determine the cluster hostname by looking at the thanos-queroer route, which should already exist
+# on the cluster by default, and already have a hostname in its Route.
+
+HOSTNAME=`kubectl get route/thanos-querier -n openshift-monitoring -o yaml  | grep "    host:" | cut -c11-`
+HOSTNAME=`echo $HOSTNAME | sed 's/thanos-querier-openshift-monitoring/grafana/g'`
+
+
+export ADMIN_SECRET_VALUE=`openssl rand -hex 10`
+
+echo
+echo "* Grafana route is: https://$HOSTNAME"
+echo "  Username: user"
+echo "  Password: $ADMIN_SECRET_VALUE"
+echo
+
+TMP_DIR=`mktemp -d`
+
+# Substitute the cluster domain into the Grafana Ingress CR
+cp -f grafana/grafana-cr.yaml $TMP_DIR/grafana-cr-resolved.yaml
+sed -i.bak 's/HOSTNAME/'$HOSTNAME'/g' $TMP_DIR/grafana-cr-resolved.yaml
+sed -i.bak 's/ADMIN_SECRET_VALUE/'$ADMIN_SECRET_VALUE'/g' $TMP_DIR/grafana-cr-resolved.yaml
+
+kubectl apply -f $TMP_DIR/grafana-cr-resolved.yaml -n grafana
+
+rm -f "$TMP_DIR/grafana-cr-resolved.yaml"
+
+# The kubectl equivalent to: 'oc adm policy add-cluster-role-to-user cluster-monitoring-view -z grafana-serviceaccount'
+kubectl apply -f grafana/grafana-cluster-role-binding.yaml -n grafana
+
+# -----------------
+echo
+echo "* Waiting for Grafana service account token secret to exist"
+while : ; do
+  kubectl get secrets -n grafana | grep "grafana-serviceaccount-token"  > /dev/null 2>&1 && break
+  sleep 1
+done
+
+echo
+echo "* Applying GrafanaDataSource, using Grafana Service Account Token"
+
+GRAFANA_SECRET=`kubectl -n grafana get secrets | grep "grafana-serviceaccount-token" |  cut -d ' ' -f 1`
+
+GRAFANA_SA_TOKEN=`kubectl -n grafana get secret $GRAFANA_SECRET -o jsonpath={.data.token} | base64 -d`
+
+cp -f grafana/grafana-data-source.yaml  $TMP_DIR/grafana-data-source-resolved.yaml
+
+sed -i.bak 's/GRAFANA_SA_TOKEN/'$GRAFANA_SA_TOKEN'/g' $TMP_DIR/grafana-data-source-resolved.yaml
+
+kubectl apply -f $TMP_DIR/grafana-data-source-resolved.yaml
+
+rm -f "$TMP_DIR/grafana-data-source-resolved.yaml"
+
+# This section was based on https://www.redhat.com/en/blog/custom-grafana-dashboards-red-hat-openshift-container-platform-4
+
+# -----------------
+echo
+echo "* Create Argo CD dashboards"
+
+# Argo CD dashboard is based on example Grafana dashboard from upstream Argo CD docs
+kubectl apply -f dashboards/argo-cd/argo-grafana-dashboard-cm.yaml
+kubectl apply -f dashboards/argo-cd/grafana-argo-dashboard.yaml
+
+# Create a ServiceMonitor for GitOps Operator, in the openshift-gitops namespace
+# - This SHOULD instead be created in the openshift-operators namespace (which is where the gitops-operator lives),
+#   but the prometheus-operator process has a hardcoded list of namespaces that it checks, openshift-operators
+#   is not on it.
+
+echo "* Create GitOps Operator ServiceMonitor"
+
+kubectl apply -f prometheus/openshift-operators-service-monitor.yaml -n openshift-gitops
+
+# -----------------
+echo
+echo "* Create GitOps Service PostgreSQL datasource and dashboard"
+TMP_DIR=`mktemp -d`
+
+while : ; do
+  kubectl get secrets -n gitops | grep "gitops-postgresql-staging"  > /dev/null 2>&1 && break
+  sleep 1
+done
+
+POSTGRESQL_CLUSTERIP=`kubectl -n gitops get service gitops-postgresql-staging -o jsonpath={.spec.clusterIP}`
+POSTGRESQL_TOKEN=`kubectl -n gitops get secret gitops-postgresql-staging -o jsonpath={.data.postgresql-password} | base64 --decode`
+
+cp -f postgresql/postgresql-data-source.yaml  $TMP_DIR/postgresql-data-source-resolved.yaml
+
+sed -i.bak 's/POSTGRESQL_CLUSTERIP/'$POSTGRESQL_CLUSTERIP'/g' $TMP_DIR/postgresql-data-source-resolved.yaml
+sed -i.bak 's~POSTGRESQL_TOKEN~'$POSTGRESQL_TOKEN'~g' $TMP_DIR/postgresql-data-source-resolved.yaml
+
+kubectl apply -f $TMP_DIR/postgresql-data-source-resolved.yaml
+
+rm -f "$TMP_DIR/postgresql-data-source-resolved.yaml"
+
+kubectl apply -f postgresql/grafana-postgresql-dashboard-cm.yaml
+kubectl apply -f postgresql/grafana-postgresql-dashboard.yaml
+echo "* Finished creating GitOps Service PostgreSQL datasource and dashboard"
+
+echo "* Install Prometheus Postgres Exporter using community Helm chart"
+# Install the postgres exporter using helm and set the relevant parameters to connect to the postgres db
+# Once it is up and running, go to the pod's log and ensure there is a message that says there is a message "Established new database connection"
+# Alternatively, can use a values file, but it is all contained here:
+helm install prometheus-community/prometheus-postgres-exporter \
+--set config.datasource.host=$POSTGRESQL_CLUSTERIP,config.datasource.user=postgres,config.datasource.passwordSecret.name=gitops-postgresql-staging,config.datasource.passwordSecret.key=postgresql-password,config.datasource.port=5432,serviceMonitor.enabled=true,serviceMonitor.namespace=gitops,serviceMonitor.interval=10s,serviceMonitor.telemetryPath=/metrics,networkPolicy.enabled=true \
+--set service.annotations."prometheus\.io/path"=/metrics --set-string service.annotations."prometheus\.io/scrape"=true -n gitops --generate-name
+
+echo "* Waiting for Prometheus Postgres Exporter pod to be up and running"
+while : ; do
+  kubectl get pods -n gitops | grep "prometheus-postgres-exporter" | grep '1/1' | grep 'Running' &> /dev/null 2>&1 && break
+  sleep 1
+done
+echo "* Finished waiting for Prometheus Postgres Exporter pod to be up and running"
+
+kubectl apply -f postgresql/grafana-postgresql-exporter-dashboard-cm.yaml
+kubectl apply -f postgresql/grafana-postgresql-exporter-dashboard.yaml
+
+# -----------------
+
+
+

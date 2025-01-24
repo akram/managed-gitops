@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -21,19 +22,19 @@ import (
 //
 // Imagine that we are implementing a task that deletes all the objects in a namespace.
 //
-// taskRetryLoop := NewTaskRetry("")
+// taskRetryLoop := NewTaskRetryLoop("(...)")
 //
 // deleteAllObjs := DeleteAllObjectsInNamespaceTask{}
 //
-// // 1) This will cause the 'DeleteAllObjects' task to start running, on namespace a
-// taskRetryLoopAddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
+// // 1) This will cause the 'DeleteAllObjects' task to start running, on namespace 'a'
+// taskRetryLoop.AddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
 //
-// // 2) This will cause the 'DeleteAllObjects' task to start running, on namespace b
-// taskRetryLoopAddTaskIfNotPresent("delete-namespace-B", deleteAllObjs, ...)
+// // 2) This will cause the 'DeleteAllObjects' task to start running, on namespace 'b'
+// taskRetryLoop.AddTaskIfNotPresent("delete-namespace-B", deleteAllObjs, ...)
 //
-// Both the tasks in step 1 and step 2 will run concurrently, because the task name if
+// Both the tasks in step 1 and step 2 will run concurrently, because the task name is
 // different ("delete-namespace-A" vs "delete-namespace-B"). If the task name was the
-// same, only one task would be allows to run concurrently.
+// same, only one task would be allowed to run concurrently.
 //
 // In order to run code as a task, the calling function must implement the 'RetryableTask' interface.
 //
@@ -46,13 +47,13 @@ import (
 // deleteAllObjs := DeleteAllObjectsInNamespaceTask{}
 //
 // // 1) This will cause the 'DeleteAllObjects' task to start running, on namespace a
-// AddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
+// taskRetryLoop.AddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
 //
 // // 2) This will cause the 'DeleteAllObjects' task to start running, on namespace B
-// AddTaskIfNotPresent("delete-namespace-B", deleteAllObjs, ...)
+// taskRetryLoop.AddTaskIfNotPresent("delete-namespace-B", deleteAllObjs, ...)
 
 // // 3) But what if AddTaskIfNotPresent is called on namespace A, before the task has finished with namespace A?
-// AddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
+// taskRetryLoop.AddTaskIfNotPresent("delete-namespace-A", deleteAllObjs, ...)
 //
 // In this case, if 'delete-namespace-A' from step 1 has not started yet, then the task from step 3) will
 // not run (it will be de-duplicated/ignored).
@@ -79,6 +80,7 @@ type RetryableTask interface {
 	PerformTask(taskContext context.Context) (bool, error)
 }
 
+// AddTaskIfNotPresent will queue a task to run within the task retry loop
 func (loop *TaskRetryLoop) AddTaskIfNotPresent(name string, task RetryableTask, backoff ExponentialBackoff) {
 
 	loop.inputChan <- taskRetryLoopMessage{
@@ -90,16 +92,6 @@ func (loop *TaskRetryLoop) AddTaskIfNotPresent(name string, task RetryableTask, 
 		},
 	}
 }
-
-// func (loop *taskRetryLoop) removeTask(name string) {
-
-// 	loop.inputChan <- taskRetryLoopMessage{
-// 		msgType: taskRetryLoop_removeTask,
-// 		payload: taskRetryMessage_removeTask{
-// 			name: name,
-// 		},
-// 	}
-// }
 
 type taskRetryMessageType string
 
@@ -159,11 +151,20 @@ func NewTaskRetryLoop(debugName string) (loop *TaskRetryLoop) {
 	return res
 }
 
+// waitingTaskContainer contains all waiting tasks
+// - waitingTasksByName and waitingTasks contain the same test of tasks, just organized in different collections
 type waitingTaskContainer struct {
+
+	// waitingTasksByName is a map of tasks, from the name of the task -> the task itself
+	// - used to tell if a task is already present in the waiting tasks list
 	waitingTasksByName map[string]any
-	waitingTasks       []waitingTaskEntry
+
+	// waitingTasks is an ordered list of tasks, ordered in the order in which they were received
+	// - used to tell which task should run next
+	waitingTasks []waitingTaskEntry
 }
 
+// waitingTaskEntry represents a single waiting task
 type waitingTaskEntry struct {
 	name                   string
 	task                   RetryableTask
@@ -175,11 +176,20 @@ func (wte *waitingTaskContainer) isWorkAvailable() bool {
 	return len(wte.waitingTasks) > 0
 }
 
-func (wte *waitingTaskContainer) addTask(entry waitingTaskEntry) {
+func (wte *waitingTaskContainer) addTask(entry waitingTaskEntry, log logr.Logger) {
+
+	// Check if the task already exists in the list (by name)
+	if _, exists := wte.waitingTasksByName[entry.name]; exists {
+		log.V(logutil.LogLevel_Debug).Info("skipping duplicate task in addTask", "taskName", entry.name)
+		return
+	}
+
+	// Otherwise, add the task
 	wte.waitingTasks = append(wte.waitingTasks, entry)
 	wte.waitingTasksByName[entry.name] = entry
 }
 
+// internalTaskEntry represents a single active (currently running) task
 type internalTaskEntry struct {
 	name         string
 	task         RetryableTask
@@ -190,6 +200,8 @@ type internalTaskEntry struct {
 }
 
 const (
+	// ReportActiveTasksEveryXMinutes is a ticker interval, which will output a status on how many
+	// tasks are active/waiting. This is useful for ensuring the service is working as expected.
 	ReportActiveTasksEveryXMinutes = 10 * time.Minute
 )
 
@@ -281,7 +293,7 @@ func internalTaskRetryLoop(inputChan chan taskRetryLoopMessage, debugName string
 
 		if msg.msgType == taskRetryLoop_addTask {
 
-			log.V(LogLevel_Debug).Info("Task retry loop: addTask received", "msg", msg)
+			log.V(logutil.LogLevel_Debug).Info("Task retry loop: addTask received", "msg", msg)
 
 			addTaskMsg, ok := (msg.payload).(taskRetryMessage_addTask)
 			if !ok {
@@ -289,19 +301,12 @@ func internalTaskRetryLoop(inputChan chan taskRetryLoopMessage, debugName string
 				continue
 			}
 
-			taskName := addTaskMsg.name
-
-			if _, exists := waitingTaskContainer.waitingTasksByName[taskName]; exists {
-				log.V(LogLevel_Debug).Info("skipping message that is already in the wait queue: " + taskName)
-				continue
-			}
-
 			newWaitingTaskEntry := waitingTaskEntry{
-				name:    taskName,
+				name:    addTaskMsg.name,
 				task:    addTaskMsg.task,
 				backoff: addTaskMsg.backoff}
 
-			waitingTaskContainer.addTask(newWaitingTaskEntry)
+			waitingTaskContainer.addTask(newWaitingTaskEntry, log)
 
 		} else if msg.msgType == taskRetryLoop_removeTask {
 
@@ -319,7 +324,7 @@ func internalTaskRetryLoop(inputChan chan taskRetryLoopMessage, debugName string
 				continue
 			}
 
-			log.V(LogLevel_Debug).Info("Removing task from retry loop: " + removeTaskMsg.name)
+			log.V(logutil.LogLevel_Debug).Info("Removing task from retry loop: " + removeTaskMsg.name)
 			delete(activeTaskMap, removeTaskMsg.name)
 
 			if taskEntry.cancelFunc != nil {
@@ -348,10 +353,10 @@ func internalTaskRetryLoop(inputChan chan taskRetryLoopMessage, debugName string
 			// Now that the task is complete, remove it from the active map
 			delete(activeTaskMap, workCompletedMsg.name)
 
-			log.V(LogLevel_Debug).Info("Task retry loop: task completed '"+taskEntry.name+"'", "shouldRetry", workCompletedMsg.shouldRetry)
+			log.V(logutil.LogLevel_Debug).Info("Task retry loop: task completed '"+taskEntry.name+"'", "shouldRetry", workCompletedMsg.shouldRetry)
 
 			if workCompletedMsg.shouldRetry {
-				log.V(LogLevel_Debug).Info("Adding failed task '" + taskEntry.name + "' to retry list")
+				log.V(logutil.LogLevel_Debug).Info("Adding failed task '" + taskEntry.name + "' to retry list")
 
 				nextScheduledRetryTime := time.Now().Add(taskEntry.backoff.IncreaseAndReturnNewDuration())
 
@@ -361,9 +366,7 @@ func internalTaskRetryLoop(inputChan chan taskRetryLoopMessage, debugName string
 					nextScheduledRetryTime: &nextScheduledRetryTime,
 					backoff:                taskEntry.backoff}
 
-				waitingTaskContainer.addTask(waitingTaskEntry)
-
-				// waitingTasks = append(waitingTasks, waitingTaskEntry)
+				waitingTaskContainer.addTask(waitingTaskEntry, log)
 			}
 			continue
 

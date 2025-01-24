@@ -47,7 +47,7 @@ func TestNGuestbook(t *testing.T) {
 				Namespace: "argocd",
 			},
 			Spec: appv1.ApplicationSpec{
-				Source: appv1.ApplicationSource{
+				Source: &appv1.ApplicationSource{
 					Path:           "guestbook",
 					TargetRevision: "HEAD",
 					RepoURL:        "https://github.com/argoproj/argocd-example-apps.git",
@@ -70,8 +70,8 @@ func TestNGuestbook(t *testing.T) {
 		}
 	}
 
-	// wait.Poll will keep checking whether a (app variable).Status.Health.Status condition is met
-	err := wait.Poll(1*time.Second, 2*time.Minute, func() (bool, error) {
+	// wait.PollImmediate will keep checking whether a (app variable).Status.Health.Status condition is met
+	err := wait.PollImmediate(1*time.Second, 2*time.Minute, func() (bool, error) {
 
 		// list all Argo CD applications in the namespace
 		appList, err := GetE2EFixtureK8sClient().AppClientset.ArgoprojV1alpha1().Applications(namespace).List(context.TODO(), v1.ListOptions{})
@@ -144,7 +144,7 @@ func TestHeavyApplication(t *testing.T) {
 			Namespace: "argocd",
 		},
 		Spec: appv1.ApplicationSpec{
-			Source: appv1.ApplicationSource{
+			Source: &appv1.ApplicationSource{
 				RepoURL: "https://github.com/jgwest/argocd-example-apps.git",
 				Path:    "appset-examples/cluster-addon/prometheus-operator",
 				Helm: &appv1.ApplicationSourceHelm{
@@ -178,7 +178,7 @@ func TestHeavyApplication(t *testing.T) {
 			Namespace: "argocd",
 		},
 		Spec: appv1.ApplicationSpec{
-			Source: appv1.ApplicationSource{
+			Source: &appv1.ApplicationSource{
 				Path:    "cert-manager",
 				RepoURL: "https://github.com/samyak-jn/gitops-sample-apps.git",
 				Helm: &appv1.ApplicationSourceHelm{
@@ -212,7 +212,7 @@ func TestHeavyApplication(t *testing.T) {
 			Namespace: "argocd",
 		},
 		Spec: appv1.ApplicationSpec{
-			Source: appv1.ApplicationSource{
+			Source: &appv1.ApplicationSource{
 				Path: "external-dns",
 				Helm: &appv1.ApplicationSourceHelm{
 					Version: "v2",
@@ -236,8 +236,8 @@ func TestHeavyApplication(t *testing.T) {
 		return
 	}
 
-	// wait.Poll will keep checking whether a (app variable).Status.Health.Status condition is met
-	err := wait.Poll(1*time.Second, 2*time.Minute, func() (bool, error) {
+	// wait.PollImmediate will keep checking whether a (app variable).Status.Health.Status condition is met
+	err := wait.PollImmediate(1*time.Second, 2*time.Minute, func() (bool, error) {
 
 		// list all Argo CD applications in the namespace
 		appList, err := GetE2EFixtureK8sClient().AppClientset.ArgoprojV1alpha1().Applications(namespace).List(context.TODO(), v1.ListOptions{})
@@ -318,7 +318,7 @@ func TestAllApplication(t *testing.T) {
 			Namespace: "argocd",
 		},
 		Spec: appv1.ApplicationSpec{
-			Source: appv1.ApplicationSource{
+			Source: &appv1.ApplicationSource{
 				RepoURL: "https://github.com/jgwest/argocd-example-apps.git",
 				Path:    "appset-examples/cluster-addon/prometheus-operator",
 				Helm: &appv1.ApplicationSourceHelm{
@@ -353,7 +353,7 @@ func TestAllApplication(t *testing.T) {
 				Namespace: "argocd",
 			},
 			Spec: appv1.ApplicationSpec{
-				Source: appv1.ApplicationSource{
+				Source: &appv1.ApplicationSource{
 					Path:           "guestbook",
 					TargetRevision: "HEAD",
 					RepoURL:        "https://github.com/argoproj/argocd-example-apps.git",
@@ -376,8 +376,8 @@ func TestAllApplication(t *testing.T) {
 		}
 	}
 
-	// wait.Poll will keep checking whether a (app variable).Status.Health.Status condition is met
-	err := wait.Poll(1*time.Second, 2*time.Minute, func() (bool, error) {
+	// wait.PollImmediate will keep checking whether a (app variable).Status.Health.Status condition is met
+	err := wait.PollImmediate(1*time.Second, 2*time.Minute, func() (bool, error) {
 
 		// list all Argo CD applications in the namespace
 		appList, err := GetE2EFixtureK8sClient().AppClientset.ArgoprojV1alpha1().Applications(namespace).List(context.TODO(), v1.ListOptions{})
@@ -468,7 +468,7 @@ func TestNResource(t *testing.T) {
 				Namespace: "argocd",
 			},
 			Spec: appv1.ApplicationSpec{
-				Source: appv1.ApplicationSource{
+				Source: &appv1.ApplicationSource{
 					Path:           "sample-app",
 					TargetRevision: "HEAD",
 					RepoURL:        "https://github.com/samyak-jn/gitops-service-sample-k8s-resources.git",
@@ -491,8 +491,8 @@ func TestNResource(t *testing.T) {
 		}
 	}
 
-	// wait.Poll will keep checking whether a (app variable).Status.Health.Status condition is met
-	err := wait.Poll(1*time.Second, 2*time.Minute, func() (bool, error) {
+	// wait.PollImmediate will keep checking whether a (app variable).Status.Health.Status condition is met
+	err := wait.PollImmediate(1*time.Second, 2*time.Minute, func() (bool, error) {
 
 		// list all Argo CD applications in the namespace
 		appList, err := GetE2EFixtureK8sClient().AppClientset.ArgoprojV1alpha1().Applications(namespace).List(context.TODO(), v1.ListOptions{})

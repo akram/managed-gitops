@@ -1,18 +1,15 @@
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-# Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
-CRD_OPTIONS ?= "crd:trivialVersions=true,preserveUnknownFields=false"
-
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.6.1)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0)
 
 KUSTOMIZE = $(shell pwd)/bin/kustomize
 kustomize: ## Download kustomize locally if necessary.
@@ -35,10 +32,6 @@ GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
 rm -rf $$TMP_DIR ;\
 }
 endef
-
-.PHONY: test
-test: fmt vet
-	go test -p=1 -race -count=1 -coverprofile=coverage.out `go list ./...`
 
 .PHONY: gosec
 gosec: go_sec
@@ -63,4 +56,21 @@ vet:
 .PHONY: clean
 clean:
 	rm -rf vendor/ bin/
-	
+
+# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
+ENVTEST_K8S_VERSION = 1.28
+
+ENVTEST = $(shell pwd)/bin/setup-envtest
+envtest: ## Download envtest-setup locally if necessary.
+	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@latest)
+
+test: fmt vet envtest ## Run tests.
+	ACK_GINKGO_DEPRECATIONS=1.16.4 KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go test -p=1 ./... -coverpkg=./... -coverprofile cover.out
+
+mocks: ##  generate mocks
+	cd $(shell pwd)/util/mocks && mockgen -build_flags=--mod=mod -destination=mock_client.go -package=mocks sigs.k8s.io/controller-runtime/pkg/client Client
+	cd $(shell pwd)/util/mocks && mockgen -build_flags=--mod=mod -destination=mock_database_queries.go -package=mocks github.com/redhat-appstudio/managed-gitops/backend-shared/db DatabaseQueries
+	cd $(shell pwd)/util/log/mocks && mockgen -build_flags=--mod=mod -destination=log_sink_mock.go -package=mocks github.com/go-logr/logr LogSink
+	cd $(shell pwd)/apis/managed-gitops/v1alpha1/mocks && mockgen -build_flags=--mod=mod -destination=status-writer.go -package=mocks sigs.k8s.io/controller-runtime/pkg/client StatusWriter
+	cd $(shell pwd)/apis/managed-gitops/v1alpha1/mocks && mockgen -build_flags=--mod=mod -destination=cr-client.go -package=mocks sigs.k8s.io/controller-runtime/pkg/client Client
+

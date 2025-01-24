@@ -29,9 +29,8 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 		It("If the operation never terminates, after we ask it to terminate, then an error should be returned.", func() {
 			argoCDNamespace := corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "argocd",
-					Namespace: "argocd",
-					UID:       uuid.NewUUID(),
+					Name: "argocd",
+					UID:  uuid.NewUUID(),
 				},
 			}
 
@@ -48,7 +47,7 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 			}
 
 			k8sClient, err := generateFakeK8sClient(application)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			mockAppServiceClient := &mocks.ApplicationServiceClient{}
 			mockAppClient := &mocks.Client{}
@@ -76,9 +75,8 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 		Context("Terminate Operation Goes To Done Test", func() {
 			argoCDNamespace := corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "argocd",
-					Namespace: "argocd",
-					UID:       uuid.NewUUID(),
+					Name: "argocd",
+					UID:  uuid.NewUUID(),
 				},
 			}
 			testCases := []struct {
@@ -115,7 +113,7 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 						}
 
 						k8sClient, err := generateFakeK8sClient(application)
-						Expect(err).To(BeNil())
+						Expect(err).ToNot(HaveOccurred())
 
 						By("Application exists and has a running operation then application doesn't exist confirm no error")
 						mockAppServiceClient := &mocks.ApplicationServiceClient{}
@@ -125,17 +123,19 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 						mockAppServiceClient.On("TerminateOperation", mock.Anything, &applicationpkg.OperationTerminateRequest{Name: &application.Name}).Return(nil, nil)
 
 						go func() {
+							defer GinkgoRecover()
+
 							time.Sleep(time.Second * 2)
 							application.Status.OperationState.Phase = testCase.finalPhase
 
 							err := k8sClient.Status().Update(context.Background(), application)
-							Expect(err).To(BeNil())
+							Expect(err).ToNot(HaveOccurred())
 						}()
 
 						startTime := time.Now()
 
 						err = terminateOperation(context.Background(), application.Name, argoCDNamespace, mockAppClient, k8sClient, time.Duration(5*time.Second), log.FromContext(context.Background()))
-						Expect(err).To(BeNil())
+						Expect(err).ToNot(HaveOccurred())
 
 						elapsedTime := time.Since(startTime)
 
@@ -154,9 +154,8 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 		It("Verify that the terminate operation exits immediately, if the application is deleted (no longer exists)", func() {
 			argoCDNamespace := corev1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "argocd",
-					Namespace: "argocd",
-					UID:       uuid.NewUUID(),
+					Name: "argocd",
+					UID:  uuid.NewUUID(),
 				},
 			}
 
@@ -174,7 +173,7 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 
 			By("Application exists and has a running operation then application doesn't exist confirm no error")
 			k8sClient, err := generateFakeK8sClient(application)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			mockAppServiceClient := &mocks.ApplicationServiceClient{}
 			mockAppClient := &mocks.Client{}
@@ -184,16 +183,17 @@ var _ = Describe("Terminate Operation on Argo CD Application", func() {
 				&applicationpkg.OperationTerminateRequest{Name: &application.Name}).Return(nil, nil)
 
 			go func() {
+				defer GinkgoRecover()
 				time.Sleep(time.Second * 2)
 				err := k8sClient.Delete(context.Background(), application)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}()
 
 			startTime := time.Now()
 
 			err = terminateOperation(context.Background(), application.Name, argoCDNamespace, mockAppClient, k8sClient,
 				time.Duration(5*time.Second), log.FromContext(context.Background()))
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			elapsedTime := time.Since(startTime)
 
@@ -225,7 +225,7 @@ func generateFakeK8sClient(initObjs ...client.Object) (client.WithWatch, error) 
 		return nil, err
 	}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObjs...).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObjs...).WithStatusSubresource(&appv1.Application{}).Build()
 
 	return k8sClient, nil
 

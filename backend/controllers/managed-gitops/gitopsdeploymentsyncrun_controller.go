@@ -23,11 +23,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/eventlooptypes"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/preprocess_event_loop"
 )
@@ -47,19 +50,21 @@ type GitOpsDeploymentSyncRunReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *GitOpsDeploymentSyncRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 
-	ctx = sharedutil.AddKCPClusterToContext(ctx, req.ClusterName)
-	_ = log.FromContext(ctx)
+	_ = log.FromContext(ctx).
+		WithName(logutil.LogLogger_managed_gitops)
+
+	rClient := sharedutil.IfEnabledSimulateUnreliableClient(r.Client)
 
 	namespace := v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: req.Namespace,
 		},
 	}
-	if err := r.Client.Get(ctx, client.ObjectKeyFromObject(&namespace), &namespace); err != nil {
+	if err := rClient.Get(ctx, client.ObjectKeyFromObject(&namespace), &namespace); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.PreprocessEventLoop.EventReceived(req, eventlooptypes.GitOpsDeploymentSyncRunTypeName, r.Client, eventlooptypes.SyncRunModified, string(namespace.UID))
+	r.PreprocessEventLoop.EventReceived(req, eventlooptypes.GitOpsDeploymentSyncRunTypeName, rClient, eventlooptypes.SyncRunModified, string(namespace.UID))
 
 	return ctrl.Result{}, nil
 }
@@ -67,6 +72,7 @@ func (r *GitOpsDeploymentSyncRunReconciler) Reconcile(ctx context.Context, req c
 // SetupWithManager sets up the controller with the Manager.
 func (r *GitOpsDeploymentSyncRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&managedgitopsv1alpha1.GitOpsDeploymentSyncRun{}).
+		For(&managedgitopsv1alpha1.GitOpsDeploymentSyncRun{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }

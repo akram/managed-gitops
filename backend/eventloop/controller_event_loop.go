@@ -3,7 +3,7 @@ package eventloop
 import (
 	"context"
 
-	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/eventlooptypes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -66,10 +66,11 @@ type controllerEventLoop_workspaceEntry struct {
 // This channel is non-blocking.
 func controllerEventLoopRouter(input chan eventlooptypes.EventLoopEvent, workspaceEventFactory workspaceEventLoopRouterFactory) {
 
-	eventLoopRouterLog := log.FromContext(context.Background())
+	outerEventLoopRouterLog := log.FromContext(context.Background()).
+		WithName(logutil.LogLogger_managed_gitops)
 
-	eventLoopRouterLog.Info("controllerEventLoopRouter started.")
-	defer eventLoopRouterLog.Error(nil, "SEVERE: controllerEventLoopRouter ended.")
+	outerEventLoopRouterLog.Info("controllerEventLoopRouter started.")
+	defer outerEventLoopRouterLog.Error(nil, "SEVERE: controllerEventLoopRouter ended.")
 
 	workspaceEntries := map[string] /* workspace id -> */ controllerEventLoop_workspaceEntry{}
 
@@ -77,13 +78,17 @@ func controllerEventLoopRouter(input chan eventlooptypes.EventLoopEvent, workspa
 
 		event := <-input
 
-		eventLoopRouterLog.V(sharedutil.LogLevel_Debug).Info("eventLoop received event",
-			"event", eventlooptypes.StringEventLoopEvent(&event), "workspace", event.WorkspaceID)
+		log := outerEventLoopRouterLog.WithValues(logutil.Log_K8s_Request_Namespace, event.Request.Namespace,
+			logutil.Log_K8s_Request_Name, event.Request.Name,
+			logutil.Log_K8s_Request_NamespaceID, event.WorkspaceID)
+
+		log.V(logutil.LogLevel_Debug).Info("eventLoop received event",
+			"event", eventlooptypes.StringEventLoopEvent(&event))
 
 		workspaceEntryVal, ok := workspaceEntries[event.WorkspaceID]
 		if !ok {
 
-			workspaceEventLoop := workspaceEventFactory.startWorkspaceEventLoopRouter(event.WorkspaceID)
+			workspaceEventLoop := workspaceEventFactory.startWorkspaceEventLoopRouter(event.Request.Namespace, event.WorkspaceID)
 
 			// Start the workspace's event loop go-routine, if it's not already started.
 			workspaceEntryVal = controllerEventLoop_workspaceEntry{
@@ -108,15 +113,16 @@ func controllerEventLoopRouter(input chan eventlooptypes.EventLoopEvent, workspa
 // defaultWorkspaceEventLoopRouterFactory should always be used, unless a mocked replacement is needed
 // for a unit test.
 type workspaceEventLoopRouterFactory interface {
-	startWorkspaceEventLoopRouter(workspaceID string) WorkspaceEventLoopRouterStruct
+	startWorkspaceEventLoopRouter(namespaceName string, namespaceID string) WorkspaceEventLoopRouterStruct
 }
 
-type defaultWorkspaceEventLoopRouterFactory struct{}
+type defaultWorkspaceEventLoopRouterFactory struct {
+}
 
 var _ workspaceEventLoopRouterFactory = defaultWorkspaceEventLoopRouterFactory{}
 
-func (defaultWorkspaceEventLoopRouterFactory) startWorkspaceEventLoopRouter(workspaceID string) WorkspaceEventLoopRouterStruct {
+func (d defaultWorkspaceEventLoopRouterFactory) startWorkspaceEventLoopRouter(namespaceName string, namespaceID string) WorkspaceEventLoopRouterStruct {
 
-	return newWorkspaceEventLoopRouter(workspaceID)
+	return newWorkspaceEventLoopRouter(namespaceName, namespaceID)
 
 }

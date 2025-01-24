@@ -20,23 +20,29 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
-
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-
+	argocdoperator "github.com/argoproj-labs/argocd-operator/api/v1alpha1"
 	appv1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
+	routev1 "github.com/openshift/api/route/v1"
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
 	argoprojiocontrollers "github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers/argoproj.io"
 	"github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers/argoproj.io/application_info_cache"
 	controllers "github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers/managed-gitops"
 	"github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers/managed-gitops/eventloop"
+	"github.com/redhat-appstudio/managed-gitops/cluster-agent/metrics"
+	argocdmetrics "github.com/redhat-appstudio/managed-gitops/cluster-agent/metrics/argocd"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -47,9 +53,11 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
+	utilruntime.Must(argocdoperator.AddToScheme(scheme))
 	utilruntime.Must(managedgitopsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(appv1.AddToScheme(scheme))
+
+	utilruntime.Must(routev1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -58,18 +66,28 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var profilerAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8083", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	opts := zap.Options{
-		Development: true,
+	flag.StringVar(&profilerAddr, "profiler-address", ":6061", "The address for serving pprof profiles")
+	opts := crzap.Options{
+		TimeEncoder: zapcore.ISO8601TimeEncoder,
+		ZapOpts: []zap.Option{
+			zap.WithCaller(true),
+		},
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(crzap.New(crzap.UseFlagOptions(&opts)))
+
+	if sharedutil.IsProfilingEnabled() {
+		setupLog.Info("Starting pprof profiler server", "address", profilerAddr)
+		go sharedutil.StartProfilers(profilerAddr)
+	}
 
 	restConfig, err := sharedutil.GetRESTConfig()
 	if err != nil {
@@ -79,9 +97,10 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: metricsAddr,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "11d017ea.redhat.com",
@@ -140,6 +159,20 @@ func main() {
 	namespacesReconciler.StartNamespaceReconciler()
 
 	//==============================================
+
+	// Call StartGoRoutineCollectOperationMetricsEveryHour function to start a goroutine to periodically clear the metrics
+	metrics.StartGoRoutineCollectOperationMetrics()
+
+	// Trigger goroutine for listing operation CRs, to update operation CR metric
+	operationCRMetricUpdater := eventloop.OperationCRMetricUpdater{
+		Client: mgr.GetClient(),
+	}
+	operationCRMetricUpdater.StartOperationCRMetricUpdater()
+
+	reconciliationMetricsUpdater := argocdmetrics.ReconciliationMetricsUpdater{
+		Client: mgr.GetClient(),
+	}
+	reconciliationMetricsUpdater.Start()
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

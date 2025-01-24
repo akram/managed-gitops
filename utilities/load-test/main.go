@@ -6,7 +6,7 @@ import (
 	utils "github.com/redhat-appstudio/managed-gitops/utilities/load-test/loadtest"
 )
 
-const ARGO_CD_VERSION = "v2.5.1"
+const ARGO_CD_VERSION = "v2.8.3"
 
 func main() {
 

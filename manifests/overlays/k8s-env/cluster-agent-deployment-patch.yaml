@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitops-service-agent-controller-manager
+  namespace: gitops
+spec:
+  template:
+    spec:
+      containers:
+      - env:
+        - name: DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL
+          value: "true"
+        name: manager

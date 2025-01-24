@@ -2,19 +2,21 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
 	argocdclient "github.com/argoproj/argo-cd/v2/pkg/apiclient"
+	"github.com/argoproj/argo-cd/v2/util/grpc"
 	"github.com/go-logr/logr"
 	"github.com/golang/protobuf/ptypes/empty"
 	routev1 "github.com/openshift/api/route/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
-
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -72,7 +74,11 @@ type defaultClientGenerator struct {
 }
 
 func (dcg *defaultClientGenerator) generateClientForServerAddress(server string, optionalAuthToken string, skipTLSTest bool) (argocdclient.Client, error) {
-	return generateDefaultClientForServerAddress(server, optionalAuthToken, false)
+	tlsCfg := tlsConfig{
+		skipTLSTest: false,
+		testTLS:     grpc.TestTLS,
+	}
+	return generateDefaultClientForServerAddress(server, optionalAuthToken, tlsCfg)
 }
 
 // NewCredentialService is used to create a new instance of the Credential service.
@@ -121,7 +127,9 @@ type credentialResponse struct {
 
 func (cs *CredentialService) credentialHandler(input chan credentialRequest) {
 
-	log := log.FromContext(context.Background())
+	log := log.FromContext(context.Background()).
+		WithName(logutil.LogLogger_managed_gitops).
+		WithValues(logutil.Log_Component, logutil.Log_Component_ClusterAgent)
 
 	credentials := map[string]argoCDCredentials{}
 
@@ -210,7 +218,7 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 	}
 
 	if len(argoCDAdminPasswords) == 0 {
-		return nil, nil, fmt.Errorf("no Argo CD admin passwords found in " + req.namespaceName)
+		return nil, nil, errors.New("no Argo CD admin passwords found in " + req.namespaceName)
 	}
 
 	// Retrieve the Argo CD host name from the Route
@@ -221,7 +229,7 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 
 		err := req.k8sClient.List(req.ctx, routeList, &client.ListOptions{Namespace: req.namespaceName})
 		if err != nil {
-			return nil, nil, fmt.Errorf("unable to get Argo CD initial admin password: %v", err)
+			return nil, nil, fmt.Errorf("unable to list Routes in namespace %s : %v", req.namespaceName, err)
 		}
 
 		for _, route := range routeList.Items {
@@ -242,7 +250,7 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 		}
 	}
 	if serverHostName == "" {
-		return nil, nil, fmt.Errorf("Unable to locate Route in " + req.namespaceName)
+		return nil, nil, errors.New("Unable to locate Route in " + req.namespaceName)
 	}
 
 	acdClient, err := cs.acdClientGenerator.generateClientForServerAddress(serverHostName, "", skipTLSTest)
@@ -251,7 +259,7 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 	}
 
 	if acdClient == nil {
-		return nil, nil, fmt.Errorf("argo CD client was nil")
+		return nil, nil, errors.New("argo CD client was nil")
 	}
 
 	// Attempt to login with every password we found, skipping failures
@@ -260,6 +268,15 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 		userToken, err := argoCDLoginCommand("admin", password, acdClient)
 
 		if err == nil && len(userToken) > 0 {
+			acdClient, err := cs.acdClientGenerator.generateClientForServerAddress(serverHostName, userToken, skipTLSTest)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if acdClient == nil {
+				return nil, nil, fmt.Errorf("argo CD client was nil")
+			}
+
 			return &argoCDCredentials{
 				ServerAddress: serverHostName,
 				Username:      "admin",
@@ -272,7 +289,7 @@ func (cs *CredentialService) getCredentialsFromNamespace(req credentialRequest, 
 		}
 	}
 
-	return nil, nil, fmt.Errorf("unable to log in to Argo CD instance in " + req.namespaceName)
+	return nil, nil, errors.New("unable to log in to Argo CD instance in " + req.namespaceName)
 
 }
 
@@ -312,9 +329,9 @@ func getArgoCDAdminPasswords(ctx context.Context, namespace string, k8sClient cl
 }
 
 // Attempt to login using the login, to verify it is correct. This is useful for verifying cached logins.
-func (cs *CredentialService) testLogin(ctx context.Context, serverAddr string, authToken string) (argocdclient.Client, error) {
+func (cs *CredentialService) testLogin(ctx context.Context, serverAddr string, authToken string) (acdClient argocdclient.Client, err error) {
 
-	acdClient, err := cs.acdClientGenerator.generateClientForServerAddress(serverAddr, authToken, false)
+	acdClient, err = cs.acdClientGenerator.generateClientForServerAddress(serverAddr, authToken, false)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create argocdclient: %v", err)
 	}
@@ -323,7 +340,12 @@ func (cs *CredentialService) testLogin(ctx context.Context, serverAddr string, a
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve acd client: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		closeErr := conn.Close()
+		if err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 
 	_, err = verIf.Version(ctx, &empty.Empty{})
 	if err != nil {

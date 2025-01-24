@@ -2,12 +2,14 @@ package application_info_cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -199,7 +201,8 @@ func applicationInfoCacheLoop(inputChan chan applicationInfoCacheRequest) {
 		channel: inputChan,
 	})
 
-	log := log.FromContext(context.Background())
+	log := log.FromContext(context.Background()).
+		WithName(logutil.LogLogger_managed_gitops).WithValues(logutil.Log_Component, logutil.Log_Component_Appstudio_Controller)
 
 	cacheAppState := map[string]applicationStateCacheEntry{}
 	cacheApp := map[string]applicationCacheEntry{}
@@ -342,7 +345,7 @@ func processGetAppStateMessage(dbQueries db.DatabaseQueries, req applicationInfo
 	}
 
 	if db.IsEmpty(req.primaryKey) {
-		err := fmt.Errorf("SEVERE: PrimaryKey should not be nil: " + req.primaryKey + " not found")
+		err := errors.New("SEVERE: PrimaryKey should not be nil: " + req.primaryKey + " not found")
 		log.Error(err, "")
 		req.responseChannel <- applicationInfoCacheResponse{
 			applicationState: db.ApplicationState{},
@@ -404,7 +407,7 @@ func processGetAppMessage(dbQueries db.DatabaseQueries, req applicationInfoCache
 	}
 
 	if db.IsEmpty(req.primaryKey) {
-		err := fmt.Errorf("SEVERE: PrimaryKey should not be nil: " + req.primaryKey + " not found")
+		err := errors.New("SEVERE: PrimaryKey should not be nil: " + req.primaryKey + " not found")
 		log.Error(err, "")
 		req.responseChannel <- applicationInfoCacheResponse{
 			application:    db.Application{},

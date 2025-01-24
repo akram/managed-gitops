@@ -23,11 +23,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/eventlooptypes"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/preprocess_event_loop"
 )
@@ -42,24 +45,28 @@ type GitOpsDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=managed-gitops.redhat.com,resources=gitopsdeployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=managed-gitops.redhat.com,resources=gitopsdeployments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=managed-gitops.redhat.com,resources=gitopsdeployments/finalizers,verbs=update
+//+kubebuilder:rbac:groups=managed-gitops.redhat.com,resources=operations,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *GitOpsDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 
-	ctx = sharedutil.AddKCPClusterToContext(ctx, req.ClusterName)
-	_ = log.FromContext(ctx)
+	_ = log.FromContext(ctx).
+		WithName(logutil.LogLogger_managed_gitops)
+
+	rClient := sharedutil.IfEnabledSimulateUnreliableClient(r.Client)
 
 	namespace := v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: req.Namespace,
 		},
 	}
-	if err := r.Client.Get(ctx, client.ObjectKeyFromObject(&namespace), &namespace); err != nil {
+	if err := rClient.Get(ctx, client.ObjectKeyFromObject(&namespace), &namespace); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.PreprocessEventLoop.EventReceived(req, eventlooptypes.GitOpsDeploymentTypeName, r.Client, eventlooptypes.DeploymentModified, string(namespace.UID))
+	r.PreprocessEventLoop.EventReceived(req, eventlooptypes.GitOpsDeploymentTypeName, rClient, eventlooptypes.DeploymentModified, string(namespace.UID))
 
 	return ctrl.Result{}, nil
 }
@@ -67,6 +74,7 @@ func (r *GitOpsDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // SetupWithManager sets up the controller with the Manager.
 func (r *GitOpsDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&managedgitopsv1alpha1.GitOpsDeployment{}).
+		For(&managedgitopsv1alpha1.GitOpsDeployment{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }

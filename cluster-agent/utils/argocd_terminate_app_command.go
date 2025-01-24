@@ -51,7 +51,7 @@ func terminateOperation(ctx context.Context, appName string, argocdNamespace cor
 
 	expireTime := time.Now().Add(expireDuration)
 
-	backoff := sharedutil.ExponentialBackoff{Factor: 2, Min: time.Duration(100 * time.Microsecond), Max: time.Duration(5 * time.Second), Jitter: true}
+	backoff := sharedutil.ExponentialBackoff{Factor: 2, Min: time.Duration(500 * time.Microsecond), Max: time.Duration(5 * time.Second), Jitter: true}
 	for {
 
 		if time.Now().After(expireTime) {
@@ -65,13 +65,16 @@ func terminateOperation(ctx context.Context, appName string, argocdNamespace cor
 				Namespace: argocdNamespace.Name,
 			},
 		}
+
+		log := log.WithValues("appName", appName, "appNamespace", argocdNamespace.Name)
+
 		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(application), application); err != nil {
 
 			if apierr.IsNotFound(err) {
-				log.Info("application '" + appName + "' no longer exists, so exiting terminate operation")
+				log.Info("application no longer exists, so exiting terminate operation")
 				return nil
 			}
-			log.Error(err, "unable to retrieve application '"+appName+"' from namespace "+argocdNamespace.Name)
+			log.Error(err, "unable to retrieve application from namespace")
 
 		} else {
 
@@ -79,7 +82,7 @@ func terminateOperation(ctx context.Context, appName string, argocdNamespace cor
 				operationPhase := application.Status.OperationState.Phase
 
 				if operationPhase != "" && operationPhase != common.OperationRunning && operationPhase != common.OperationTerminating {
-					log.Info("application '" + appName + "' operation is no longer running (or not running).")
+					log.Info("application operation is no longer running (or not running).")
 					return nil
 				}
 			}

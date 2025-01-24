@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop"
 	"github.com/redhat-appstudio/managed-gitops/backend/eventloop/eventlooptypes"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -50,7 +50,8 @@ func NewPreprocessEventLoop() *PreprocessEventLoop {
 func preprocessEventLoopRouter(input chan eventlooptypes.EventLoopEvent, nextStep *eventloop.ControllerEventLoop) {
 
 	ctx := context.Background()
-	log := log.FromContext(ctx)
+	log := log.FromContext(ctx).
+		WithName(logutil.LogLogger_managed_gitops)
 
 	for {
 
@@ -70,7 +71,7 @@ func emitEvent(event eventlooptypes.EventLoopEvent, nextStep *eventloop.Controll
 		return
 	}
 
-	log.V(sharedutil.LogLevel_Debug).Info("Emitting event to workspace event loop",
+	log.V(logutil.LogLevel_Debug).Info("Emitting event to controller event loop",
 		"event", eventlooptypes.StringEventLoopEvent(&event), "debug-context", debugStr)
 
 	nextStep.EventLoopInputChannel <- event

@@ -18,15 +18,15 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db/util"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db/util"
+	sharedoperations "github.com/redhat-appstudio/managed-gitops/backend-shared/util/operations"
 	"github.com/redhat-appstudio/managed-gitops/backend-shared/util/tests"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,19 +53,19 @@ var _ = Describe("Garbage Collect Operations", func() {
 			log = logger.FromContext(ctx)
 
 			err = db.SetupForTestingDBGinkgo()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			dbq, err = db.NewUnsafePostgresDBQueries(true, true)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			scheme, _, _, _, err := tests.GenericTestSetup()
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 			k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			gc = NewGarbageCollector(dbq, k8sClient)
 
 			_, _, _, gitopsEngineInstance, clusterAccess, err = db.CreateSampleData(dbq)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 
 		It("operations with expired gc interval should be removed", func() {
@@ -81,7 +81,7 @@ var _ = Describe("Garbage Collect Operations", func() {
 				Last_state_update:       time.Now(),
 			}
 			err = dbq.CreateOperation(ctx, &validOperation, validOperation.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			By("wait until we exceed the expiration time")
 			time.Sleep(2 * time.Second)
@@ -95,7 +95,7 @@ var _ = Describe("Garbage Collect Operations", func() {
 			By("operation CR should be removed from the cluster")
 			operationCR := &managedgitopsv1alpha1.Operation{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("operation-%s", validOperation.Operation_id),
+					Name:      sharedoperations.GenerateOperationCRName(validOperation),
 					Namespace: util.GetGitOpsEngineSingleInstanceNamespace(),
 				},
 			}
@@ -116,16 +116,16 @@ var _ = Describe("Garbage Collect Operations", func() {
 				Last_state_update:       time.Now(),
 			}
 			err = dbq.CreateOperation(ctx, &invalidOperation, invalidOperation.Operation_owner_user_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			gc.garbageCollectOperations(ctx, []db.Operation{invalidOperation}, log)
 
 			By("operation should not be removed from DB")
 			err = dbq.GetOperationById(ctx, &invalidOperation)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			_, err = dbq.DeleteOperationById(ctx, invalidOperation.Operation_id)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 })

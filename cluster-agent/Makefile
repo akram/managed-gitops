@@ -37,10 +37,8 @@
 
 # # Image URL to use all building/pushing image targets
 # IMG ?= controller:latest
-# # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
-# CRD_OPTIONS ?= "crd:trivialVersions=true,preserveUnknownFields=false"
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.21
+ENVTEST_K8S_VERSION = 1.28
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -48,6 +46,10 @@ GOBIN=$(shell go env GOPATH)/bin
 else
 GOBIN=$(shell go env GOBIN)
 endif
+
+# Get the OS and ARCH values to be used for building the binary.
+OS ?= $(shell go env GOOS)
+ARCH ?= $(shell go env GOARCH)
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # This is a requirement for 'setup-envtest.sh' in the test target.
@@ -75,10 +77,23 @@ help: ## Display this help.
 
 ##@ Development
 
-manifests: controller-gen ## Cluster-agent consumes the custom resources from backend-shared, so ensure the manifests are updated there.
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+
+generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+
+
+
+
+
+
+
+
+shared-manifests: controller-gen ## Cluster-agent consumes the custom resources from backend-shared, so ensure the manifests are updated there.
 	cd ../backend-shared; make manifests; cd ../cluster-agent
 
-generate: controller-gen ## Cluster-agent consumes the resource code from backend-shared, so ensure the model code is generate there.
+shared-generate: controller-gen ## Cluster-agent consumes the resource code from backend-shared, so ensure the model code is generate there.
 	cd ../backend-shared; make generate; cd ../cluster-agent
 
 fmt: ## Run go fmt against code.
@@ -88,16 +103,36 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 test: fmt vet envtest ## Run tests.
-	ACK_GINKGO_DEPRECATIONS=1.16.4 KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -p=1 ./... -coverpkg=./... -coverprofile cover.out
+	ACK_GINKGO_DEPRECATIONS=1.16.4 KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go test -p=1 ./... -coverpkg=./... -timeout=3m -coverprofile cover.out
 
 ##@ Build
 
 build: generate fmt vet ## Build manager binary.
-	go build -o bin/manager main.go
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build -o bin/manager main.go
 
 run: manifests generate fmt vet ## Run a controller from your host.
-	KUBECONFIG=${WORKLOAD_KUBECONFIG} go run ./main.go --zap-log-level info --zap-time-encoding=rfc3339nano
+	ENABLE_APPPROJECT_ISOLATION=true DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true go run ./main.go --zap-log-level info --zap-time-encoding=rfc3339nano
 # more on controller log level configuration: https://sdk.operatorframework.io/docs/building-operators/golang/references/logging/
+
+run-no-self-heal: manifests generate fmt vet ## Run a controller from your host.
+	SELF_HEAL_INTERVAL=0 ENABLE_APPPROJECT_ISOLATION=true DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true  KUBECONFIG=${WORKLOAD_KUBECONFIG} go run ./main.go --zap-log-level info --zap-time-encoding=rfc3339nano
+
+runexec: ## Run a controller from your host using exe in current folder
+ifeq (,$(wildcard ./main))
+runexec: manifests generate fmt vet
+	@echo Building and running cluster-agent
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build ./main.go
+	ENABLE_APPPROJECT_ISOLATION=true DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true main --zap-log-level info --zap-time-encoding=rfc3339nano
+else
+runexec:
+	@echo Running cluster-agent using existing main executable.
+	 ENABLE_APPPROJECT_ISOLATION=true DEV_ONLY_ALLOW_NON_TLS_CONNECTION_TO_POSTGRESQL=true main --zap-log-level info --zap-time-encoding=rfc3339nano
+endif
+
+chaos-run: manifests generate fmt vet ## Chaos Engineering: Simulate a controller that restarts every ~33 seconds.
+	go build -o /tmp/cluster-agent-manager-chaos main.go
+	ENABLE_APPPROJECT_ISOLATION=true KILL_INTERVAL="45" KILL_INITIAL="10" ../utilities/random-kill.sh /tmp/cluster-agent-manager-chaos --zap-log-level info --zap-time-encoding=rfc3339nano
+	rm /tmp/cluster-agent-manager-chaos
 
 # docker-build: test ## Build docker image with the manager.
 # 	docker build -t ${IMG} .
@@ -123,7 +158,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.6.1)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0)
 
 KUSTOMIZE = $(shell pwd)/bin/kustomize
 kustomize: ## Download kustomize locally if necessary.
@@ -222,3 +257,15 @@ gosec: go_sec
 .PHONY: clean
 clean:
 	rm -rf vendor/ bin/
+
+# Remove the vendor and bin folders
+.PHONY: clean-exec
+clean-exec:
+	rm main
+
+mocks: ##  generate mocks
+	mockery --srcpkg=github.com/argoproj/argo-cd/v2/pkg/apiclient/application --name=ApplicationServiceClient --output $(shell pwd)/utils/mocks
+	mockery --srcpkg=github.com/argoproj/argo-cd/v2/pkg/apiclient --name=Client --output $(shell pwd)/utils/mocks
+	mockery --srcpkg=github.com/argoproj/argo-cd/v2/pkg/apiclient/session --name=SessionServiceClient --output $(shell pwd)/utils/mocks
+	mockery --srcpkg=github.com/argoproj/argo-cd/v2/pkg/apiclient/settings --name=SettingsServiceClient --output $(shell pwd)/utils/mocks
+	mockery --srcpkg=github.com/argoproj/argo-cd/v2/pkg/apiclient/version --name=VersionServiceClient --output $(shell pwd)/utils/mocks

@@ -2,6 +2,9 @@ package eventloop
 
 import (
 	"context"
+	"time"
+
+	argosharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/argocd"
 	"github.com/redhat-appstudio/managed-gitops/backend-shared/util/operations"
 
 	"github.com/argoproj/argo-cd/v2/common"
@@ -11,8 +14,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	operation "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/config/db/util"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
+	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/db/util"
 	"github.com/redhat-appstudio/managed-gitops/backend-shared/util/tests"
 	"github.com/redhat-appstudio/managed-gitops/cluster-agent/controllers"
 	corev1 "k8s.io/api/core/v1"
@@ -39,28 +42,29 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 		k8sClient            client.WithWatch
 		logger               logr.Logger
 	)
+
 	// Set up the test
 	BeforeEach(func() {
 		By("Connecting to the database")
 		err = db.SetupForTestingDBGinkgo()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		dbq, err = db.NewUnsafePostgresDBQueries(true, true)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		ctx = context.Background()
 		logger = log.FromContext(ctx) // do this, or invalid memory address or nil pointer dereference will occur
 
 		By("Get a clusterEngineInstance")
 		scheme, argocdNamespace, kubesystemNamespace, workspace, err := tests.GenericTestSetup()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		_, _, _, _, _, err = db.CreateSampleData(dbq)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		gitopsEngineCluster, _, err := dbutil.GetOrCreateGitopsEngineClusterByKubeSystemNamespaceUID(ctx, string(kubesystemNamespace.UID), dbq, logger)
 		Expect(gitopsEngineCluster).ToNot(BeNil())
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		gitopsEngineInstance = &db.GitopsEngineInstance{
 			Gitopsengineinstance_id: "test-fake-engine-instance",
@@ -69,7 +73,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 			EngineCluster_id:        gitopsEngineCluster.Gitopsenginecluster_id,
 		}
 		err = dbq.CreateGitopsEngineInstance(ctx, gitopsEngineInstance)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Satisfying the foreign key constraint 'fk_clusteruser_id'")
 		clusterUser = &db.ClusterUser{
@@ -77,13 +81,13 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 			User_name:      "test-repocred-user",
 		}
 		err = dbq.CreateClusterUser(ctx, clusterUser)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		// To work with Kubernetes you need a client and a task
 		By("Initialize fake kube client")
 
 		err = appv1.AddToScheme(scheme)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		gitopsDepl := &operation.GitOpsDeployment{
 			ObjectMeta: metav1.ObjectMeta{
@@ -131,7 +135,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				// Create an Operation DB Row and a corresponding Operation CR
 				operationCR, operationDB, err = operations.CreateOperation(ctx, false, dbOperationInput, clusterUser.Clusteruser_id, namespace, dbq, k8sClient, logger)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				task.event.request.Name = operationCR.Name // Correct the task's Operation CR name request
 				logger.Info("operationCR", "operationCR", operationCR)
 				logger.Info("operationDB", "operationDB", operationDB)
@@ -150,11 +154,13 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- injecting the fake RepositoryCredential into the database ---")
 				err = dbq.CreateRepositoryCredentials(ctx, &repositoryCredential)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- getting the RepositoryCredentials object from the database ---")
 				fetch, err := dbq.GetRepositoryCredentialsByID(ctx, operationDB.Resource_id)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(fetch.Created_on.After(time.Now().Add(time.Minute*-5))).To(BeTrue(), "Created on should be within the last 5 minutes")
+				fetch.Created_on = repositoryCredential.Created_on
 				Expect(fetch).Should(Equal(repositoryCredential))
 			})
 
@@ -164,13 +170,13 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- calling processOperation_RepositoryCredentials() ---")
 				retry, err := task.PerformTask(ctx)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(retry).To(BeFalse())
 
 				By(" --- getting the secret ---")
 				secret := &corev1.Secret{}
-				err = task.event.client.Get(ctx, types.NamespacedName{Name: repositoryCredential.SecretObj, Namespace: namespace}, secret)
-				Expect(err).To(BeNil())
+				err = task.event.client.Get(ctx, types.NamespacedName{Name: argosharedutil.GenerateArgoCDRepoCredSecretName(repositoryCredential), Namespace: namespace}, secret)
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- checking secret compatibility with ArgoCD ---")
 				Expect(secret.Data).Should(HaveKey("url"))
@@ -190,7 +196,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- checking Operation DB status ---")
 				err = dbq.GetOperationById(ctx, operationDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(operationDB.State).Should(Equal(db.OperationState_Completed))
 			})
 		})
@@ -207,7 +213,6 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 			BeforeEach(func() {
 				By(" --- create the ArgoCD secret with wrong values and missing argocd labels & annotations ---")
 				secret = &corev1.Secret{
-					TypeMeta: metav1.TypeMeta{},
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-fake-secret-wrong-values",
 						Namespace: namespace,
@@ -222,7 +227,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				err = task.event.client.Create(ctx, secret)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- creating an Operation DB row and CR with a valid Resource_id ---")
 				dbOperationInput := db.Operation{
@@ -235,7 +240,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				operationCR, operationDB, err = operations.CreateOperation(ctx, false, dbOperationInput, clusterUser.Clusteruser_id, namespace, dbq, k8sClient, logger)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				task.event.request.Name = operationCR.Name // Correct the task's Operation CR name request
 
 				By(" --- creating a RepositoryCredentials DB row with Resource_id as its PrimaryKey ---")
@@ -252,11 +257,13 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- injecting the fake RepositoryCredential into the database ---")
 				err = dbq.CreateRepositoryCredentials(ctx, &repositoryCredential)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- getting the RepositoryCredentials object from the database ---")
 				fetch, err := dbq.GetRepositoryCredentialsByID(ctx, operationDB.Resource_id)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(fetch.Created_on.After(time.Now().Add(time.Minute*-5))).To(BeTrue(), "Created on should be within the last 5 minutes")
+				fetch.Created_on = repositoryCredential.Created_on
 				Expect(fetch).Should(Equal(repositoryCredential))
 			})
 
@@ -266,13 +273,13 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- calling processOperation_RepositoryCredentials() ---")
 				retry, err := task.PerformTask(ctx)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(retry).To(BeFalse())
 
 				By(" --- getting the secret ---")
 				secret := &corev1.Secret{}
-				err = task.event.client.Get(ctx, types.NamespacedName{Name: repositoryCredential.SecretObj, Namespace: namespace}, secret)
-				Expect(err).To(BeNil())
+				err = task.event.client.Get(ctx, types.NamespacedName{Name: argosharedutil.GenerateArgoCDRepoCredSecretName(repositoryCredential), Namespace: namespace}, secret)
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- checking secret compatibility with ArgoCD ---")
 				Expect(secret.Data).Should(HaveKey("url"))
@@ -292,7 +299,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- checking Operation DB status ---")
 				err = dbq.GetOperationById(ctx, operationDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(operationDB.State).Should(Equal(db.OperationState_Completed))
 			})
 		})
@@ -308,7 +315,6 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 			BeforeEach(func() {
 				By(" --- creating the ArgoCD secret with wrong values and missing argocd labels & annotations ---")
 				secret = &corev1.Secret{
-					TypeMeta: metav1.TypeMeta{},
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-fake-obsolete-secret",
 						Namespace: namespace,
@@ -330,7 +336,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				err = task.event.client.Create(ctx, secret)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- creating an Operation DB row and CR with a valid Resource_id ---")
 				dbOperationInput := db.Operation{
@@ -343,7 +349,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				operationCR, operationDB, err = operations.CreateOperation(ctx, false, dbOperationInput, clusterUser.Clusteruser_id, namespace, dbq, k8sClient, logger)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				task.event.request.Name = operationCR.Name // Correct the task's Operation CR name request
 			})
 
@@ -351,17 +357,17 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- calling processOperation_RepositoryCredentials() ---")
 				retry, err := task.PerformTask(ctx)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(retry).To(BeFalse())
 
 				By(" --- getting the secret ---")
 				secret := &corev1.Secret{}
 				err = task.event.client.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: namespace}, secret)
-				Expect(err).ToNot(BeNil())
+				Expect(err).To(HaveOccurred())
 
 				By(" --- checking Operation DB status ---")
 				err = dbq.GetOperationById(ctx, operationDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(operationDB.State).Should(Equal(db.OperationState_Completed))
 			})
 		})
@@ -378,7 +384,6 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 			BeforeEach(func() {
 				By(" --- creating the ArgoCD secret 1 with wrong values and missing argocd labels & annotations ---")
 				secret1 = &corev1.Secret{
-					TypeMeta: metav1.TypeMeta{},
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-fake-obsolete-secret-1",
 						Namespace: namespace,
@@ -400,11 +405,10 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				err = task.event.client.Create(ctx, secret1)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- creating the ArgoCD secret 2 with wrong values and missing argocd labels & annotations ---")
 				secret2 = &corev1.Secret{
-					TypeMeta: metav1.TypeMeta{},
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-fake-obsolete-secret-2",
 						Namespace: namespace,
@@ -426,7 +430,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				err = task.event.client.Create(ctx, secret2)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 
 				By(" --- creating an Operation DB row and CR with a valid Resource_id ---")
 				dbOperationInput := db.Operation{
@@ -439,7 +443,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				operationCR, operationDB, err = operations.CreateOperation(ctx, false, dbOperationInput, clusterUser.Clusteruser_id, namespace, dbq, k8sClient, logger)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				task.event.request.Name = operationCR.Name // Correct the task's Operation CR name request
 			})
 
@@ -447,20 +451,20 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- calling processOperation_RepositoryCredentials() ---")
 				retry, err := task.PerformTask(ctx)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(retry).To(BeFalse())
 
 				By(" --- getting the first secret ---")
 				err = task.event.client.Get(ctx, types.NamespacedName{Name: secret1.Name, Namespace: namespace}, secret1)
-				Expect(err).ToNot(BeNil())
+				Expect(err).To(HaveOccurred())
 
 				By(" --- getting the second secret ---")
 				err = task.event.client.Get(ctx, types.NamespacedName{Name: secret2.Name, Namespace: namespace}, secret2)
-				Expect(err).ToNot(BeNil())
+				Expect(err).To(HaveOccurred())
 
 				By(" --- checking Operation DB status ---")
 				err = dbq.GetOperationById(ctx, operationDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(operationDB.State).Should(Equal(db.OperationState_Completed))
 			})
 		})
@@ -485,7 +489,7 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 				}
 
 				operationCR, operationDB, err = operations.CreateOperation(ctx, false, dbOperationInput, clusterUser.Clusteruser_id, namespace, dbq, k8sClient, logger)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				task.event.request.Name = operationCR.Name // Correct the task's Operation CR name request
 			})
 
@@ -493,12 +497,12 @@ var _ = Describe("Testing Repository Credentials Operation", func() {
 
 				By(" --- calling processOperation_RepositoryCredentials() ---")
 				retry, err := task.PerformTask(ctx)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(retry).To(BeFalse())
 
 				By(" --- checking Operation DB status ---")
 				err = dbq.GetOperationById(ctx, operationDB)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 				Expect(operationDB.State).Should(Equal(db.OperationState_Completed))
 			})
 		})

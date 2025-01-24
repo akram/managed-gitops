@@ -3,14 +3,12 @@ package core
 import (
 	"context"
 
-	appv1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
+	appv1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	managedgitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
-	dbutil "github.com/redhat-appstudio/managed-gitops/backend-shared/config/db/util"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/util/argocd"
 	"github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture"
-	appFixture "github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture/application"
 	gitopsDeplFixture "github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture/gitopsdeployment"
 	"github.com/redhat-appstudio/managed-gitops/tests-e2e/fixture/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,13 +16,14 @@ import (
 )
 
 var _ = Describe("GitOpsDeployment Status Tests", func() {
+
 	Context("Status field of GitOpsDeployment is updated accurately", func() {
 		It("GitOpsDeployment .status.resources field is populated with the right resources", func() {
 			Expect(fixture.EnsureCleanSlate()).To(Succeed())
 
 			By("create a new GitOpsDeployment resource")
-			gitOpsDeploymentResource := buildGitOpsDeploymentResource("gitops-depl-test-status",
-				"https://github.com/redhat-appstudio/managed-gitops", "resources/test-data/sample-gitops-repository/environments/overlays/dev",
+			gitOpsDeploymentResource := gitopsDeplFixture.BuildGitOpsDeploymentResource("gitops-depl-test-status",
+				fixture.RepoURL, fixture.GitopsDeploymentPath,
 				managedgitopsv1alpha1.GitOpsDeploymentSpecType_Automated)
 
 			k8sClient, err := fixture.GetE2ETestUserWorkspaceKubeClient()
@@ -93,6 +92,18 @@ var _ = Describe("GitOpsDeployment Status Tests", func() {
 				),
 			)
 
+			By("verify if the operationState field is populated")
+			app := &appv1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      argocd.GenerateArgoCDApplicationName(string(gitOpsDeploymentResource.UID)),
+					Namespace: "gitops-service-argocd",
+				},
+			}
+			err = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(app), app)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(gitopsDeplFixture.HaveOperationStateFunc(app.Status.OperationState, gitOpsDeploymentResource)).To(BeTrue())
+
 			By("delete the GitOpsDeployment resource")
 			err = k8s.Delete(&gitOpsDeploymentResource, k8sClient)
 			Expect(err).To(Succeed())
@@ -100,86 +111,31 @@ var _ = Describe("GitOpsDeployment Status Tests", func() {
 	})
 })
 
-var _ = Describe("GitOpsDeployment SyncError test", func() {
+var _ = Describe("GitOpsDeployment Status.Conditions tests", func() {
 
-	Context("Errors are set properly in Status.Sync.SyncError field of GitOpsDeployment", func() {
+	Context("Errors are set properly in Status.Conditions field of GitOpsDeployment", func() {
 
-		It("ensures that GitOpsDeployment .status.sync.syncError field contains the syncError if Application is not synced and error type of the error is SyncError ", func() {
+		It("ensures that errors are set properly in GitOpsDeployment .Status.Conditions field when spec.source.path field is empty", func() {
 
 			Expect(fixture.EnsureCleanSlate()).To(Succeed())
+
+			By("create an invalid GitOpsDeployment application")
+			gitOpsDeploymentResource := gitopsDeplFixture.BuildGitOpsDeploymentResource("managed-environment-gitops-depl",
+				fixture.RepoURL, "",
+				managedgitopsv1alpha1.GitOpsDeploymentSpecType_Automated)
 
 			k8sClient, err := fixture.GetE2ETestUserWorkspaceKubeClient()
 			Expect(err).To(Succeed())
 
-			By("create an invalid GitOpsDeployment application")
-			gitOpsDeploymentResource := managedgitopsv1alpha1.GitOpsDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "managed-gitops-depl",
-					Namespace: fixture.GitOpsServiceE2ENamespace,
-				},
-				Spec: managedgitopsv1alpha1.GitOpsDeploymentSpec{
-					Source: managedgitopsv1alpha1.ApplicationSource{
-						RepoURL: "https://github.com/managed-gitops-test-data/gitops-repositories",
-						Path:    "invalid-repository",
-					},
-					Type: managedgitopsv1alpha1.GitOpsDeploymentSpecType_Automated,
-				},
-			}
-
 			err = k8s.Create(&gitOpsDeploymentResource, k8sClient)
 			Expect(err).To(Succeed())
 
-			Eventually(gitOpsDeploymentResource, ArgoCDReconcileWaitTime, "1s").Should(
-				SatisfyAll(
-					gitopsDeplFixture.HaveSyncStatusCode(managedgitopsv1alpha1.SyncStatusCodeOutOfSync),
-					gitopsDeplFixture.HaveHealthStatusCode(managedgitopsv1alpha1.HeathStatusCodeHealthy),
-				),
-			)
-
-			By("Get the Application name created by the GitOpsDeployment resource")
-			dbQueries, err := db.NewUnsafePostgresDBQueries(false, false)
-			Expect(err).To(BeNil())
-
-			appMapping := &db.DeploymentToApplicationMapping{
-				Deploymenttoapplicationmapping_uid_id: string(gitOpsDeploymentResource.UID),
-			}
-			err = dbQueries.GetDeploymentToApplicationMappingByDeplId(context.Background(), appMapping)
-			Expect(err).To(BeNil())
-
-			dbApplication := &db.Application{
-				Application_id: appMapping.Application_id,
-			}
-			err = dbQueries.GetApplicationById(context.Background(), dbApplication)
-			Expect(err).To(BeNil())
-
-			app := appv1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dbApplication.Name,
-					Namespace: dbutil.GetGitOpsEngineSingleInstanceNamespace(),
-				},
-			}
-
-			By("Wait for Argo CD to reconcile and set the conditions.Message field on the Application with the syncError")
-			expectedConditionsOfApplication := appv1alpha1.ApplicationStatus{
-				Conditions: []appv1alpha1.ApplicationCondition{
-					{
-						Message: "Failed sync attempt to 5ce3833a57c1582f93ea49c2947a5b4b4992ef6f: one or more synchronization tasks are not valid (retried 5 times).",
-					},
-				},
-			}
-
-			Eventually(app, "10m", "1s").Should(
-				SatisfyAll(
-					appFixture.HaveApplicationSyncError(expectedConditionsOfApplication),
-				),
-			)
-
 			expectedConditions := []managedgitopsv1alpha1.GitOpsDeploymentCondition{
 				{
-					Type:    managedgitopsv1alpha1.GitOpsDeploymentConditionSyncError,
-					Message: "Failed sync attempt to 5ce3833a57c1582f93ea49c2947a5b4b4992ef6f: one or more synchronization tasks are not valid (retried 5 times).",
+					Type:    managedgitopsv1alpha1.GitOpsDeploymentConditionErrorOccurred,
+					Message: managedgitopsv1alpha1.GitOpsDeploymentUserError_PathIsRequired,
 					Status:  managedgitopsv1alpha1.GitOpsConditionStatusTrue,
-					Reason:  managedgitopsv1alpha1.GitopsDeploymentReasonSyncError,
+					Reason:  managedgitopsv1alpha1.GitopsDeploymentReasonErrorOccurred,
 				},
 			}
 
@@ -188,51 +144,88 @@ var _ = Describe("GitOpsDeployment SyncError test", func() {
 					gitopsDeplFixture.HaveConditions(expectedConditions),
 				),
 			)
+		})
 
-			err = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(&gitOpsDeploymentResource), &gitOpsDeploymentResource)
+		It("ensures that errors are set properly in GitOpsDeployment .Status.Conditions field when spec.source.path field is '/'", func() {
+
+			Expect(fixture.EnsureCleanSlate()).To(Succeed())
+
+			By("create an invalid GitOpsDeployment application")
+			gitOpsDeploymentResource := gitopsDeplFixture.BuildGitOpsDeploymentResource("managed-environment-gitops-depl",
+				fixture.RepoURL, "/",
+				managedgitopsv1alpha1.GitOpsDeploymentSpecType_Automated)
+
+			k8sClient, err := fixture.GetE2ETestUserWorkspaceKubeClient()
 			Expect(err).To(Succeed())
 
-			By("Update the gitOpsDeploymentResource to fix the failure")
-			gitOpsDeploymentResource.Spec.Source.RepoURL = "https://github.com/redhat-appstudio/managed-gitops"
-			gitOpsDeploymentResource.Spec.Source.Path = "resources/test-data/sample-gitops-repository/environments/overlays/dev"
-
-			err = k8s.Update(&gitOpsDeploymentResource, k8sClient)
+			err = k8s.Create(&gitOpsDeploymentResource, k8sClient)
 			Expect(err).To(Succeed())
 
-			By("Wait until ArgoCD Application .conditions.Message value is cleared")
-			updateExpectedConditionsOfApplication := appv1alpha1.ApplicationStatus{
-				Conditions: []appv1alpha1.ApplicationCondition{
-					{
-						Message: "",
-					},
-				},
-			}
-
-			Eventually(app, "5m", "1s").Should(
-				SatisfyAll(
-					appFixture.HaveApplicationSyncError(updateExpectedConditionsOfApplication),
-				),
-			)
-
-			By("Wait until GitopsDeployment condition statis is false")
-			expectedConditionsUpdate := []managedgitopsv1alpha1.GitOpsDeploymentCondition{
+			expectedConditions := []managedgitopsv1alpha1.GitOpsDeploymentCondition{
 				{
-					Type:    managedgitopsv1alpha1.GitOpsDeploymentConditionSyncError,
-					Message: "Failed sync attempt to 5ce3833a57c1582f93ea49c2947a5b4b4992ef6f: one or more synchronization tasks are not valid (retried 5 times).",
-					Status:  managedgitopsv1alpha1.GitOpsConditionStatusFalse,
-					Reason:  "SyncErrorResolved",
+					Type:    managedgitopsv1alpha1.GitOpsDeploymentConditionErrorOccurred,
+					Message: managedgitopsv1alpha1.GitOpsDeploymentUserError_InvalidPathSlash,
+					Status:  managedgitopsv1alpha1.GitOpsConditionStatusTrue,
+					Reason:  managedgitopsv1alpha1.GitopsDeploymentReasonErrorOccurred,
 				},
 			}
 
 			Eventually(gitOpsDeploymentResource, "5m", "1s").Should(
 				SatisfyAll(
-					gitopsDeplFixture.HaveConditions(expectedConditionsUpdate),
+					gitopsDeplFixture.HaveConditions(expectedConditions),
 				),
 			)
+		})
 
-			By("delete the GitOpsDeployment resource")
-			err = k8s.Delete(&gitOpsDeploymentResource, k8sClient)
+		It("ensures that the conditions are propagated from Application to GitOpsDeployment", func() {
+			Expect(fixture.EnsureCleanSlate()).To(Succeed())
+
+			By("create an invalid GitOpsDeployment application with invalid Repo URL")
+			gitOpsDeploymentResource := managedgitopsv1alpha1.GitOpsDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "managed-environment-gitops-depl",
+					Namespace: fixture.GitOpsServiceE2ENamespace,
+				},
+				Spec: managedgitopsv1alpha1.GitOpsDeploymentSpec{
+					Source: managedgitopsv1alpha1.ApplicationSource{
+						RepoURL: "https://github.com/redhat-appstudio/managed-gito",
+						Path:    "/path",
+					},
+					Type: managedgitopsv1alpha1.GitOpsDeploymentSpecType_Automated,
+				},
+			}
+
+			k8sClient, err := fixture.GetE2ETestUserWorkspaceKubeClient()
 			Expect(err).To(Succeed())
+
+			err = k8s.Create(&gitOpsDeploymentResource, k8sClient)
+			Expect(err).To(Succeed())
+
+			preArgoCDv18ExpectedConditions := []managedgitopsv1alpha1.GitOpsDeploymentCondition{
+				{
+					Type:    managedgitopsv1alpha1.ApplicationConditionComparisonError,
+					Message: `rpc error: code = Unknown desc = authentication required`,
+					Status:  managedgitopsv1alpha1.GitOpsConditionStatusTrue,
+					Reason:  managedgitopsv1alpha1.ApplicationConditionComparisonError,
+				},
+			}
+
+			// In Argo CD v1.8+, the condition error message has changed
+			argoCDv18ExpectedConditions := []managedgitopsv1alpha1.GitOpsDeploymentCondition{
+				{
+					Type:    managedgitopsv1alpha1.ApplicationConditionComparisonError,
+					Message: `Failed to load target state: failed to generate manifest for source 1 of 1: rpc error: code = Unknown desc = authentication required`,
+					Status:  managedgitopsv1alpha1.GitOpsConditionStatusTrue,
+					Reason:  managedgitopsv1alpha1.ApplicationConditionComparisonError,
+				},
+			}
+
+			Eventually(gitOpsDeploymentResource, "5m", "1s").Should(
+				SatisfyAny(
+					gitopsDeplFixture.HaveConditions(preArgoCDv18ExpectedConditions),
+					gitopsDeplFixture.HaveConditions(argoCDv18ExpectedConditions),
+				),
+			)
 		})
 	})
 })

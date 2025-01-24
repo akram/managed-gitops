@@ -27,8 +27,7 @@ var _ = Describe("ArgoCD Login Credentials", func() {
 
 				namespace := &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "openshift-gitops",
-						Namespace: "openshift-gitops",
+						Name: "openshift-gitops",
 					},
 				}
 
@@ -37,6 +36,7 @@ var _ = Describe("ArgoCD Login Credentials", func() {
 						Name:      "openshift-gitops-cluster",
 						Namespace: "openshift-gitops",
 					},
+					Type: "Opaque",
 					Data: map[string][]byte{
 						"admin.password": []byte("a1Y4c0RvdkgxcHFPUTNJYWxSaDRubXlaZ3c3QUJGcmQ="),
 					},
@@ -57,7 +57,7 @@ var _ = Describe("ArgoCD Login Credentials", func() {
 				}
 
 				k8sClient, err = generateFakeK8sClient(namespace, loginSecret, route)
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}
 
 			mockVersionClient := &mocks.VersionServiceClient{}
@@ -82,23 +82,23 @@ var _ = Describe("ArgoCD Login Credentials", func() {
 			}
 
 			cs := NewCredentialService(&clientGenerator, true)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 
 			creds, argoClient, err := cs.GetArgoCDLoginCredentials(context.Background(), "openshift-gitops", "12", true, k8sClient)
-			Expect(err).To(BeNil())
-			Expect(argoCDCredentials{} == creds).To(BeFalse())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(argoCDCredentials{}).ToNot(Equal(creds))
 			Expect(argoClient).ToNot(BeNil())
 
 			By("A second call should work as well")
 			creds, argoClient, err = cs.GetArgoCDLoginCredentials(context.Background(), "openshift-gitops", "12", true, k8sClient)
-			Expect(err).To(BeNil())
-			Expect(argoCDCredentials{} == creds).To(BeFalse())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(argoCDCredentials{}).ToNot(Equal(creds))
 			Expect(argoClient).ToNot(BeNil())
 
 			By("Acquire from the cache")
 			creds, argoClient, err = cs.GetArgoCDLoginCredentials(context.Background(), "openshift-gitops", "12", false, k8sClient)
-			Expect(err).To(BeNil())
-			Expect(argoCDCredentials{} == creds).To(BeFalse())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(argoCDCredentials{}).ToNot(Equal(creds))
 			Expect(argoClient).ToNot(BeNil())
 
 		})

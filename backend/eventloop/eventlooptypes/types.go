@@ -5,12 +5,10 @@ import (
 	"fmt"
 
 	gitopsv1alpha1 "github.com/redhat-appstudio/managed-gitops/backend-shared/apis/managed-gitops/v1alpha1"
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -48,38 +46,38 @@ type EventLoopEvent struct {
 	WorkspaceID string
 }
 
-// GetReqResourceAsClientObject converts the resource into a simple client.Object: it will be of
-// the expected type (GitOpsDeployment/SyncRun/etc), but only contain the name and namespace.
-func (ele *EventLoopEvent) GetReqResourceAsSimpleClientObject() (client.Object, error) {
-
-	var resource client.Object
-
-	if ele.ReqResource == GitOpsDeploymentTypeName {
-		resource = &gitopsv1alpha1.GitOpsDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ele.Request.Name,
-				Namespace: ele.Request.Namespace,
-			},
-		}
-	} else if ele.ReqResource == GitOpsDeploymentSyncRunTypeName {
-		resource = &gitopsv1alpha1.GitOpsDeploymentSyncRun{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ele.Request.Name,
-				Namespace: ele.Request.Namespace,
-			},
-		}
-	} else if ele.ReqResource == GitOpsDeploymentRepositoryCredentialTypeName {
-		resource = &gitopsv1alpha1.GitOpsDeploymentRepositoryCredential{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ele.Request.Name,
-				Namespace: ele.Request.Namespace,
-			},
-		}
-	} else {
-		return nil, fmt.Errorf("SEVERE - unexpected request resource type: %v", string(ele.ReqResource))
+// EventsMatch returns "" if the events match, otherwise returns a string indicating which field did not match
+func EventsMatch(one *EventLoopEvent, two *EventLoopEvent) string {
+	if one == nil && two == nil {
+		return ""
 	}
 
-	return resource, nil
+	if (one == nil && two != nil) || (one != nil && two == nil) {
+		return "nil mismatch"
+	}
+
+	if one.EventType != two.EventType {
+		return "eventtype mismatch"
+	}
+
+	if one.ReqResource != two.ReqResource {
+		return "reqresource mismatch"
+	}
+
+	if one.Request.Name != two.Request.Name {
+		return "request name mismatch"
+	}
+
+	if one.Request.Namespace != two.Request.Namespace {
+		return "request namespace mismatch"
+	}
+
+	if one.WorkspaceID != two.WorkspaceID {
+		return "workspaceid mismatch"
+	}
+
+	return ""
+
 }
 
 // Packages an EventLoopEvent as a message between event loop channels.
@@ -88,19 +86,24 @@ type EventLoopMessage struct {
 	MessageType EventLoopMessageType
 	Event       *EventLoopEvent
 
-	// ShutdownSignalled is included as part of workComplete message, to indicate that the goroutine has succesfully shut down.
+	// ShutdownSignalled is included as part of workComplete message, to indicate that the goroutine has successfully shut down.
 	ShutdownSignalled bool
 }
 
 type EventLoopMessageType int
 
 const (
+
 	// ApplicationEventLoopMessageType_WorkComplete indicates the message indicates that a particular task has completed.
 	// For example:
 	ApplicationEventLoopMessageType_WorkComplete EventLoopMessageType = iota
 
 	// ApplicationEventLoopMessageType_Event indicates that the message contains an event
 	ApplicationEventLoopMessageType_Event
+
+	// ApplicationEventLoopMessageType_StatusCheck is a periodic ticker that tells the application event loop to
+	// check if it should terminate its goroutine
+	ApplicationEventLoopMessageType_StatusCheck
 )
 
 // eventlooptypes.StringEventLoopEvent is a utility function for debug purposes.
@@ -129,72 +132,16 @@ func GetWorkspaceIDFromNamespaceID(namespace corev1.Namespace) string {
 }
 
 // GetK8sClientForGitOpsEngineInstance returns a client for accessing resources from a GitOpsEngine cluster based on the environment.
-// KCP environment: return a client that targets a workload cluster where the GitOpsEngine instance is deployed.
-// non-KCP environment: return a normal client that targets the same cluster as backend.
+// Returns a normal client that targets the same cluster as backend.
 func GetK8sClientForGitOpsEngineInstance(ctx context.Context, gitopsEngineInstance *db.GitopsEngineInstance) (client.Client, error) {
 
-	// TODO: GITOPSRVCE-73: When we support multiple Argo CD instances (and multiple instances on separate clusters), this logic should be updated.
+	// TODO: GITOPSRVCE-66: Update this once we support using Argo CD instances that are running on a separate cluster	serviceClient, err := GetK8sClientForServiceWorkspace()
 	serviceClient, err := GetK8sClientForServiceWorkspace()
 	if err != nil {
 		return nil, err
 	}
 
-	if !sharedutil.IsRunningAgainstKCP() {
-		return serviceClient, nil
-	}
-
-	return getGitOpsEngineWorkloadClient(ctx, serviceClient, gitopsEngineInstance)
-}
-
-func getGitOpsEngineWorkloadClient(ctx context.Context, serviceClient client.Client, gitopsEngineInstance *db.GitopsEngineInstance) (client.Client, error) {
-
-	if !sharedutil.IsRunningAgainstKCP() {
-		return nil, fmt.Errorf("use a service provider client in a non-KCP environment")
-	}
-
-	// In a KCP environment, Argo CD will be installed on a workload cluster. We need to retrieve the credentials required to connect to the Argo CD instance, which is stored in the secret.
-	clusterCreds := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "gitops-engine-cluster",
-			Namespace: "gitops",
-		},
-	}
-	err := serviceClient.Get(ctx, client.ObjectKeyFromObject(clusterCreds), clusterCreds)
-	if err != nil {
-		return nil, fmt.Errorf("unable to find cluster credentials for GitOpsEngine cluster: %v", err)
-	}
-
-	host, ok := clusterCreds.Data["host"]
-	if !ok {
-		return nil, fmt.Errorf("missing host API URL in the GitOpsEngine cluster secret")
-	}
-	bearerToken, ok := clusterCreds.Data["bearer_token"]
-	if !ok {
-		return nil, fmt.Errorf("missing bearer token in the GitOpsEngine cluster secret")
-	}
-
-	// create a new client with the host and bearer token of the GitOpsEngine cluster.
-	config := &rest.Config{
-		Host:        string(host),
-		BearerToken: string(bearerToken),
-		TLSClientConfig: rest.TLSClientConfig{
-			Insecure:   true,
-			ServerName: "",
-		},
-	}
-
-	scheme := runtime.NewScheme()
-	err = corev1.AddToScheme(scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	err = gitopsv1alpha1.AddToScheme(scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	return client.New(config, client.Options{Scheme: scheme})
+	return serviceClient, nil
 }
 
 // GetK8sClientForServiceWorkspace returns a client for service provider workspace
@@ -213,7 +160,9 @@ func GetK8sClientForServiceWorkspace() (client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	k8sClient, err := client.New(config, client.Options{Scheme: scheme})
+	k8sClient = sharedutil.IfEnabledSimulateUnreliableClient(k8sClient)
 	if err != nil {
 		return nil, err
 	}

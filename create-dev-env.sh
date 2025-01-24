@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-
 # Checks if a binary is present on the local system
+POSTGRESQL_DATABASE="${POSTGRESQL_DATABASE:=postgres}"
 exit_if_binary_not_installed() {
   for binary in "$@"; do
     command -v "$binary" >/dev/null 2>&1 || {
@@ -21,7 +21,7 @@ wait-until() {
     ((i++))
 
     if [ "${i}" -gt "${timeout}" ]; then
-      echo "postgress server never replied back, aborting due to ${timeout}s timeout!"
+      echo "postgres server never replied back, aborting due to ${timeout}s timeout!"
       exit 1
     fi
 
@@ -47,7 +47,7 @@ if [ "$1" = "kube" ]; then
   done
   echo " * Postgres secret has been created."
 
-   # Wait until postgres pod is running
+  # Wait until postgres pod is running
   echo " * Wait until Postgres pod is running"
   counter=0
   until kubectl -n gitops get pods | grep postgres | grep '1/1' | grep 'Running' &> /dev/null
@@ -112,7 +112,6 @@ if [ "$1" = "kube" ]; then
   if lsof -i:5432 | grep LISTEN; then
     echo " * Port forwarding is still active for some reason. Investigate further ..."
   fi
-
   # Exit now, do not continue with the rest of the bash script
   echo
   echo " ------------------------------------------------"
@@ -120,8 +119,8 @@ if [ "$1" = "kube" ]; then
   echo " ------------------------------------------------"
 
   echo "  - Run:            kubectl port-forward --namespace gitops svc/gitops-postgresql-staging 5432:5432 &"
-  echo "  - Credentials:    HOST=127.0.0.1:5432  USERNAME=postgres  PASSWORD=$POSTGRES_PASSWORD  DB=postgres"
-  echo "  - Access Example: psql postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/postgres -c \"select now()\""
+  echo "  - Credentials:    HOST=127.0.0.1:5432  USERNAME=postgres  PASSWORD=$POSTGRES_PASSWORD  DB=$POSTGRESQL_DATABASE"
+  echo "  - Access Example: psql postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/$POSTGRESQL_DATABASE -c \"select now()\""
   echo
   echo "  - To run Backend & ClusterAgent Operators locally: export DB_PASS=$POSTGRES_PASSWORD && goreman start"
   echo " -------------------------------------------------"
@@ -147,71 +146,129 @@ if [ "$1" = "kube-auto" ]; then
   echo " * Postgres secret has been created."
 
   # Wait until postgres pod is running
-  if [ "$GITOPS_IN_KCP" != "true" ]; then
-    echo " * Wait until Postgres pod is running"
-    counter=0
-    until kubectl -n gitops get pods | grep postgres | grep '1/1' | grep 'Running' &> /dev/null
-    do
-      ((counter++))
-      sleep 1
-      if [ "$counter" -gt 150 ]; then
-        echo " --> Error: PostgreSQL pod cannot start. Quitting ..."
-        echo ""
-        echo "Namespace events:"
-        kubectl get events -n gitops
-        exit 1
-      fi
-    done
-    echo " * Postgres Pod is running."
-
-    # With the new migration logic, this block should no longer be required: remove the commented out
-    # section once we confirmed it is no longer needed.
-
-    # Checks if 5432 is occupied
-    if lsof -i:5432 | grep LISTEN; then
-      echo " --> Error: Your local port TCP 5432 is already in use. Quit port-forward."
+  echo " * Wait until Postgres pod is running"
+  counter=0
+  until kubectl -n gitops get pods | grep postgres | grep '1/1' | grep 'Running' &> /dev/null
+  do
+    ((counter++))
+    sleep 1
+    if [ "$counter" -gt 150 ]; then
+      echo " --> Error: PostgreSQL pod cannot start. Quitting ..."
+      echo ""
+      echo "Namespace events:"
+      kubectl get events -n gitops
       exit 1
     fi
-    echo " * Start port-fowarding PostgreSQL to localhost:5432 ..."
+  done
+  echo " * Postgres Pod is running."
 
+  # With the new migration logic, this block should no longer be required: remove the commented out
+  # section once we confirmed it is no longer needed.
 
-    # Port forward the PostgreSQL service locally, so we can access it
-    kubectl port-forward --namespace gitops svc/gitops-postgresql-staging 5432:5432 &>/dev/null &
-    KUBE_PID=$!
-
-    # Checks if 5432 is occupied
-    counter=0
-    until lsof -i:5432 | grep LISTEN
-    do
-      sleep 1
-      if [ "$counter" -gt 10 ]; then
-        echo ".. retry $counter ..."
-        echo " --> Error: Port-forwarding takes too long. Quiting ..."
-        if ! kill $KUBE_PID; then
-          echo " --> Error: Cannot kill the background port-forward, do it yourself."
-        fi
-        exit 1
-      fi
-    done
-    echo " * Port-Forwarding worked"
-
-    # Decode the password from the secret
-    POSTGRES_PASSWORD=$(kubectl get -n gitops secret gitops-postgresql-staging -o jsonpath="{.data.postgresql-password}" | base64 --decode)
-
-    # Call the migration binary to migrate the database to the latest version
-    make db-migrate
-
-    # Do not stop port-forwarding
-    echo "Port-forwarding is active. You can stop it with 'kill $KUBE_PID'"
-    echo "Or you can find the process with typing: 'sudo lsof -i:5432'"
-  else
-    # This else scenario mainly focus on running e2e test with kcp on Openshift CI or in local KCP/CKCP/CPS setups
-    # Decode the password from the secret
-    POSTGRES_PASSWORD=$(kubectl get -n gitops secret gitops-postgresql-staging -o jsonpath="{.data.postgresql-password}" | base64 --decode)
-
-    echo "Port-forwarding is yet not supported in kcp, skipping ..."
-    echo "The pods under this scenario will be running on your workload end, hence 'pods' as a resource is not available with current kubeconfig, skipping ..."
+  # Checks if 5432 is occupied
+  if lsof -i:5432 | grep LISTEN; then
+    echo " --> Error: Your local port TCP 5432 is already in use. Quit port-forward."
+    exit 1
   fi
+  echo " * Start port-fowarding PostgreSQL to localhost:5432 ..."
+
+
+  # Port forward the PostgreSQL service locally, so we can access it
+  kubectl port-forward --namespace gitops svc/gitops-postgresql-staging 5432:5432 &>/dev/null &
+  KUBE_PID=$!
+
+  # Checks if 5432 is occupied
+  counter=0
+  until lsof -i:5432 | grep LISTEN
+  do
+    sleep 1
+    if [ "$counter" -gt 10 ]; then
+      echo ".. retry $counter ..."
+      echo " --> Error: Port-forwarding takes too long. Quiting ..."
+      if ! kill $KUBE_PID; then
+        echo " --> Error: Cannot kill the background port-forward, do it yourself."
+      fi
+      exit 1
+    fi
+  done
+  echo " * Port-Forwarding worked"
+
+  # Decode the password from the secret
+  POSTGRES_PASSWORD=$(kubectl get -n gitops secret gitops-postgresql-staging -o jsonpath="{.data.postgresql-password}" | base64 --decode)
+
+  # Call the migration binary to migrate the database to the latest version
+  make db-migrate
+
+  # Do not stop port-forwarding
+  echo "Port-forwarding is active. You can stop it with 'kill $KUBE_PID'"
+  echo "Or you can find the process with typing: 'sudo lsof -i:5432'"
+  
+
+  # Set up pg_stat_statements for postgresql metrics
+  echo " * Setting up pg_stat_statements for PostgreSQL metrics"
+  # This statement creates the postgresql.auto.conf file and is located in the same folder as the postgresql.conf file
+  # It can located via the command SHOW config_file;
+  ./psql.sh -c 'ALTER SYSTEM SET shared_preload_libraries TO pg_stat_statements;' 
+  # This reloads the config
+  ./psql.sh -c 'select pg_reload_conf();' 
+  # This creates the pg_stat_statements extension if it doesn't already exist
+  ./psql.sh -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+
+  # The above requires us to restart the server/service. For our dev env, this should be 'ok' to do.
+  echo " * Need to restart the Postgres pod and wait until Postgres pod is running"
+  # This command forces a delete and recreate of the postgres pod. Set the timeout to be 5s for now because the code
+  # that follows will wait for the pod to be recreated.  That way we see the dots (...) to indicate that you have to wait.
+  kubectl get pod gitops-postgresql-staging-postgresql-0 -n gitops -o yaml | kubectl replace --timeout=5s --force -f - &> /dev/null
+
+  # Now, wait until postgres pod is running
+  echo "   * Wait until Postgres pod is running and ready"
+  counter=0
+  until kubectl -n gitops get pods | grep postgres | grep '1/1' | grep 'Running' &> /dev/null
+  do
+    ((counter++))
+    sleep 1
+    echo -n "."
+    if [ "$counter" -gt 150 ]; then
+      echo " --> Error: PostgreSQL pod cannot start. Quitting ..."
+      echo ""
+      echo "Namespace events:"
+      kubectl get events -n gitops
+      exit 1
+    fi
+  done
+  echo
+  echo "   * Postgres Pod is running."
+  echo " * Finished setting up pg_stat_statements for PostgreSQL metrics"
+  echo " * Restarting port forwarding"
+  # The port forward process needs to be terminated and restarted since we restarted the PostgreSQL service, so
+  # kill the original process.  If we don't kill it, the server will eventually kill it.
+  # Stop port-forwarding
+  if ! kill $KUBE_PID &>/dev/null; then
+    echo " Error: Cannot kill the port-forward process, kill the process yourself and rerun the command"
+    exit 1
+  else
+    wait $KUBE_PID 2>/dev/null
+    echo "   * Previous port-forwarding has been successfully stopped"
+  fi
+  echo "   * Creating a new port-forward process"
+  # Port forward the PostgreSQL service locally again, so we can access it
+  kubectl port-forward --namespace gitops svc/gitops-postgresql-staging 5432:5432 &>/dev/null &
+  PORT_FORWARD_PID=$!
+
+
+  # Checks if 5432 is occupied
+  counter=0
+  until lsof -i:5432 | grep LISTEN
+  do
+    sleep 1
+    if [ "$counter" -gt 10 ]; then
+      echo "Timed out waiting for port-forward process to start. Rerun port-forward command."
+      exit 1
+    fi
+  done
+  echo "   * Port-Forwarding worked"
+  echo "   * Port-forwarding is active. You can stop it with 'kill $PORT_FORWARD_PID'"
+  echo "   * Or you can find the process with typing: 'sudo lsof -i:5432'"
   exit 0
 fi
 
@@ -236,7 +293,6 @@ PGADMIN_CONTAINER="managed-gitops-pgadmin"
 RETRIES=30                                            # in seconds
 POSTGRES_DATA_DIR=$(mktemp -d -t postgres-XXXXXXXXXX) # Map the docker data directory into a temporary directory
 POSTGRES_SERVER_IS_UP="docker exec --user postgres -e PGPASSWORD=gitops -i \"$POSTGRES_CONTAINER\" \"psql\" -h localhost -d postgres -U postgres -p 5432 -c \"select 1\" | grep '1 row' >/dev/null 2>&1"
-
 # Create docker network if one doesn't exist yet
 echo "* Creating docker network '$NETWORK'"
 ID=$(docker network ls --filter "name=$NETWORK" -q 2>/dev/null)
@@ -301,7 +357,7 @@ if ! docker ps | grep "$PGADMIN_CONTAINER" >/dev/null 2>&1; then
 fi
 
 echo
-echo "* Waiting $RETRIES seconds until postgress server is up..."
+echo "* Waiting $RETRIES seconds until postgres server is up..."
 wait-until "$POSTGRES_SERVER_IS_UP" "${RETRIES}"
 echo "  Done"
 echo
@@ -329,7 +385,7 @@ else
   -e PGPASSWORD=gitops \
   -i "$POSTGRES_CONTAINER" "psql" \
   -h localhost \
-  -d postgres \
+  -d $POSTGRESQL_DATABASE \
   -U postgres \
   -p 5432 \
   -q -f db-schema.sql

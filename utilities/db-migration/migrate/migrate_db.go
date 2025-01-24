@@ -2,16 +2,18 @@ package migrate
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	migrate "github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	db "github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
+	db "github.com/redhat-appstudio/managed-gitops/backend-shared/db"
 )
 
 func Migrate(opType string, migrationPath string) error {
-	addr, password := db.GetAddrAndPassword()
+	addr, password, dbName := db.GetAddrAndPassword()
 	port := 5432
 
 	// Base64 strings can contain '/' characters, which mess up URL parsing.
@@ -20,7 +22,7 @@ func Migrate(opType string, migrationPath string) error {
 
 	m, err := migrate.New(
 		migrationPath,
-		fmt.Sprintf("postgresql://postgres:%s@%s:%v/postgres?sslmode=disable", password, addr, port))
+		fmt.Sprintf("postgresql://postgres:%s@%s:%v/%s?sslmode=disable", password, addr, port, dbName))
 	if err != nil {
 		return fmt.Errorf("unable to connect to DB: %v", err)
 	}
@@ -34,7 +36,7 @@ func Migrate(opType string, migrationPath string) error {
 		return nil
 
 	} else if opType == "drop_smtable" {
-		dbq, err := db.ConnectToDatabaseWithPort(true, "postgres", port)
+		dbq, err := db.ConnectToDatabaseWithPort(true, port)
 		if err != nil {
 			return fmt.Errorf("unable to connect to DB: %v", err)
 		} else {
@@ -59,6 +61,16 @@ func Migrate(opType string, migrationPath string) error {
 	} else if opType == "upgrade_migration" {
 		if err := m.Steps(1); err != nil {
 			return fmt.Errorf("unable to upgrade migration version by 1 level: %v", err)
+		}
+		return nil
+	} else if opType == "migrate_to" {
+		u64, err := strconv.ParseUint(os.Args[2], 10, 32)
+		if err != nil {
+			return err
+		}
+		version := uint(u64)
+		if err := m.Migrate(version); err != nil && err != migrate.ErrNoChange {
+			return fmt.Errorf("unable to Migrate to version %d: %v", version, err)
 		}
 		return nil
 	} else {

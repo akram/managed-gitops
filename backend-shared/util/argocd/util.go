@@ -4,15 +4,22 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/redhat-appstudio/managed-gitops/backend-shared/config/db"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
 )
 
 const (
 	managedEnvPrefix = "managed-env-"
+	repoCredPrefix   = "repo-cred-" // #nosec G101
 
 	// ArgoCDDefaultDestinationInCluster is 'in-cluster' which is the spec destination value that Argo CD recognizes
 	// as indicating that Argo CD should deploy to the local cluster (the cluster that Argo CD is installed on).
 	ArgoCDDefaultDestinationInCluster = "in-cluster"
+
+	// Label added to the resources managed by Argo CD.
+	ArgocdResourceLabel = "app.kubernetes.io/instance"
+
+	// Prefix added while generating Argo CD Application name.
+	gitopsDeplPrefix = "gitopsdepl-"
 )
 
 // GenerateArgoCDClusterSecretName generates the name of the Argo CD cluster secret (and the name of the server within Argo CD).
@@ -21,7 +28,12 @@ func GenerateArgoCDClusterSecretName(managedEnv db.ManagedEnvironment) string {
 }
 
 func GenerateArgoCDApplicationName(gitopsDeploymentCRUID string) string {
-	return "gitopsdepl-" + string(gitopsDeploymentCRUID)
+	return gitopsDeplPrefix + string(gitopsDeploymentCRUID)
+}
+
+// GenerateArgoCDRepoCredSecretName generates the name of the Argo CD Repository Credentials secret.
+func GenerateArgoCDRepoCredSecretName(repoCred db.RepositoryCredentials) string {
+	return repoCredPrefix + repoCred.RepositoryCredentialsID
 }
 
 // ConvertArgoCDClusterSecretNameToManagedIdDatabaseRowId takes the name of an Argo CD cluster secret as input.
@@ -54,4 +66,37 @@ func ConvertArgoCDClusterSecretNameToManagedIdDatabaseRowId(argoCDClusterSecretN
 
 	return managedEnvID, isLocalEnv_false, nil
 
+}
+
+type ClusterSecretTLSClientConfigJSON struct {
+	Insecure bool `json:"insecure"`
+}
+type ClusterSecretConfigJSON struct {
+	BearerToken     string                           `json:"bearerToken"`
+	TLSClientConfig ClusterSecretTLSClientConfigJSON `json:"tlsClientConfig"`
+}
+
+func GetArgoCDApplicationName(labels map[string]string) string {
+	if value, found := labels[ArgocdResourceLabel]; found {
+		if strings.HasPrefix(value, gitopsDeplPrefix) {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func ExtractUIDFromApplicationName(name string) string {
+
+	if !strings.HasPrefix(name, gitopsDeplPrefix) {
+		return ""
+	}
+
+	id := name[len(gitopsDeplPrefix):]
+
+	if len(id) != 36 { // length of a standard uuid
+		return ""
+	}
+
+	return id
 }

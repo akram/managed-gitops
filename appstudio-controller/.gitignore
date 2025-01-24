@@ -1,4 +1,5 @@
 vendor
+appstudio-controller
 
 # Binaries for programs and plugins
 *.exe
@@ -8,6 +9,7 @@ vendor
 *.dylib
 bin
 testbin/*
+main
 
 # Test binary, build with `go test -c`
 *.test

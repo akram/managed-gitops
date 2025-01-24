@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base/crd/overlays/stonesoup
+- ../../base/gitops-namespace
+# This is not needed: these kustomize overlay is used to run appstudio-e2e tests in infra-deployments, 
+# and these tests assume that there is no DeploymentTargetClass defined.
+#       - ../../base/cluster-scoped
+- ../../../appstudio-controller/config/default-no-prometheus
+- ../../../backend/config/default-no-prometheus
+- ../../../cluster-agent/config/default-no-prometheus
+- ../../base/postgresql-staging
+- ../../base/gitops-service-argocd/base
+- prometheus/
+
+patchesStrategicMerge:
+- backend-deployment-patch.yaml
+- cluster-agent-deployment-patch.yaml
+- appstudio-controller-deployment-patch.yaml
+
+# Uncomment to use a custom image:
+# images:
+#   - name: \${COMMON_IMAGE}
+#     newName: quay.io/(your user name)/gitops-service
+#     newTag: latest

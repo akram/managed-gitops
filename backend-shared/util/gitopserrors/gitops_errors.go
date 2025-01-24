@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -36,6 +37,18 @@ type userErrorImpl struct {
 	devError  error // may be nil
 }
 
+// A ConditionError is a UserError that also contains a reason suitable for reporting as a
+// https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition.Reason
+type ConditionError interface {
+	UserError
+	ConditionReason() string
+}
+
+type conditionErrorImp struct {
+	userErrorImpl
+	reason string
+}
+
 // GitOpsErrorType can be used with Print to output the error message, for debugging purposes
 type GitOpsErrorType int
 
@@ -45,7 +58,7 @@ const (
 	All      GitOpsErrorType = iota
 )
 
-// // DevError returns a non-user-facing error, or nil
+// DevError returns a non-user-facing error, or nil
 func (ue userErrorImpl) DevError() error {
 	if ue.devError != nil {
 		return ue.devError
@@ -54,14 +67,18 @@ func (ue userErrorImpl) DevError() error {
 	return nil
 }
 
-// // DevError return a user-facing error string, or ""
+// UserError return a user-facing error string, or ""
 func (ue userErrorImpl) UserError() string {
 	return ue.userError
 }
 
+func (ce conditionErrorImp) ConditionReason() string {
+	return ce.reason
+}
+
 // NewDevOnlyError is used if there is no meaningful information that we can provide the user on why the error occurred
 // and/or how to fix it. This function should only be used when the error is primarily referencing internal GitOps Service
-// technical detials.
+// technical details.
 func NewDevOnlyError(devError error) UserError {
 	return NewUserDevError(UnknownError, devError)
 }
@@ -70,7 +87,8 @@ func NewDevOnlyError(devError error) UserError {
 // This function should be used when an error occurs, and we can provide both user and dev errors around the context of that error.
 func NewUserDevError(userErrorString string, devError error) UserError {
 
-	log := log.FromContext(context.Background())
+	log := log.FromContext(context.Background()).
+		WithName(logutil.LogLogger_managed_gitops)
 
 	if userErrorString == "" {
 		diagnosticMsg := fmt.Sprintf("SEVERE: Asked to create an Error with nil user error message. devError message is '%v'.", devError)
@@ -87,6 +105,16 @@ func NewUserDevError(userErrorString string, devError error) UserError {
 	return userErrorImpl{
 		userError: userErrorString,
 		devError:  devError,
+	}
+}
+
+func NewUserConditionError(userError string, devError error, reason string) ConditionError {
+	return conditionErrorImp{
+		userErrorImpl: userErrorImpl{
+			userError: userError,
+			devError:  devError,
+		},
+		reason: reason,
 	}
 }
 

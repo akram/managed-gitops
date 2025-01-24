@@ -2,14 +2,18 @@ package controllers
 
 import (
 	"context"
+	"reflect"
 	"time"
 
 	appv1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	"github.com/go-logr/logr"
+	"github.com/redhat-appstudio/managed-gitops/backend-shared/db"
 	sharedutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util"
+	logutil "github.com/redhat-appstudio/managed-gitops/backend-shared/util/log"
 	apierr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -34,7 +38,7 @@ const (
 // - If the Application is not deleted after X+2 minutes, return an error
 func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application, eventClient client.Client, log logr.Logger) error {
 
-	log = log.WithValues("name", appFromList.Name, "namespace", appFromList.Namespace, "uid", string(appFromList.UID))
+	log = log.WithValues("argoCDApplicationName", appFromList.Name, "argoCDApplicationNamespace", appFromList.Namespace, "argoCDApplicationUID", string(appFromList.UID))
 
 	log.Info("Attempting to delete Argo CD Application CR")
 
@@ -57,7 +61,7 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 	}
 
 	if value, exists := app.Labels[ArgoCDApplicationDatabaseIDLabel]; !exists || value == "" {
-		log.V(sharedutil.LogLevel_Debug).Info("skipping non-GitOps Service application")
+		log.V(logutil.LogLevel_Debug).Info("skipping non-GitOps Service application")
 		return nil
 	}
 
@@ -79,7 +83,7 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 					log.Error(err, "unable to update application with finalizer")
 					return err
 				}
-				sharedutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, sharedutil.ResourceModified, log)
+				logutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, logutil.ResourceModified, log)
 
 			}
 		}
@@ -90,7 +94,7 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 			log.Error(err, "unable to delete application with finalizer")
 			return err
 		}
-		sharedutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, sharedutil.ResourceDeleted, log)
+		logutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, logutil.ResourceDeleted, log)
 
 	}
 
@@ -114,7 +118,7 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 	for {
 
 		if time.Now().After(expirationTime) {
-			log.V(sharedutil.LogLevel_Warn).Error(nil, "Argo CD application finalizer-based delete expired in deleteArgoCDApplication")
+			log.V(logutil.LogLevel_Warn).Error(nil, "Argo CD application finalizer-based delete expired in deleteArgoCDApplication")
 			break
 		}
 
@@ -137,6 +141,7 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 	// If the Argo CD was unable to delete the application properly, then just remove the finalizer and
 	// wait for it to go away (up to 2 minutes)
 	if !success {
+		log.Info("Argo CD was not able to delete the application. Removing any finalizers and waiting for it to go away.")
 
 		backoff.Reset()
 
@@ -167,13 +172,13 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 
 				if len(app.Finalizers) != 0 {
 					// If the application exists, and it has a finalizer, remove the finalizer and try again
-					log.Info("removing finalizer from Application")
+					log.Info("Removing finalizers from the Application")
 					app.Finalizers = []string{}
 					if err := eventClient.Update(ctx, app); err != nil {
 						log.Error(err, "unable to remove finalizer from Application")
 						continue
 					}
-					sharedutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, sharedutil.ResourceModified, log)
+					logutil.LogAPIResourceChangeEvent(app.Namespace, app.Name, app, logutil.ResourceModified, log)
 
 				}
 			}
@@ -183,10 +188,53 @@ func DeleteArgoCDApplication(ctx context.Context, appFromList appv1.Application,
 	}
 
 	if !success {
-		log.Info("Application was not successfully deleted")
+		log.Error(nil, "Argo CD Application was not successfully deleted")
 	} else {
-		log.Info("Application was successfully deleted")
+		log.Info("Argo CD Application was successfully deleted")
 	}
 
 	return nil
+}
+
+// CompareApplication compares an Argo CD Application and the spec field of a DB Application row, returning "" if the same,
+// otherwise returning the specific difference.
+func CompareApplication(argoCDApp appv1.Application, dbApplication db.Application, log logr.Logger) (string, error) {
+
+	// reflect.DeepEqual will treat empty slices differently depending on how they are defined, so we ensure that
+	// in every case, an empty slice is defined as a appv1.SyncOptions{}
+	sanitizeApp := func(input appv1.Application) appv1.Application {
+		if input.Spec.SyncPolicy != nil {
+
+			if len(input.Spec.SyncPolicy.SyncOptions) == 0 {
+				input.Spec.SyncPolicy.SyncOptions = appv1.SyncOptions{}
+			}
+		}
+		return input
+	}
+	argoCDApp = sanitizeApp(*argoCDApp.DeepCopy())
+
+	specFieldAppFromDB := appv1.Application{}
+
+	if err := yaml.Unmarshal([]byte(dbApplication.Spec_field), &specFieldAppFromDB); err != nil {
+		log.Error(err, "SEVERE: unable to unmarshal DB application spec field, on updating existing Application CR: "+argoCDApp.Name)
+		// We return nil here, with no retry, because there's likely nothing else that can be done to fix this.
+		// Thus there is no need to keep retrying.
+		return "", nil
+	}
+
+	specFieldAppFromDB = sanitizeApp(specFieldAppFromDB)
+
+	var specDiff string
+	if !reflect.DeepEqual(specFieldAppFromDB.Spec.Source, argoCDApp.Spec.Source) {
+		specDiff = "spec.source fields differ"
+	} else if !reflect.DeepEqual(specFieldAppFromDB.Spec.Destination, argoCDApp.Spec.Destination) {
+		specDiff = "spec.destination fields differ"
+	} else if specFieldAppFromDB.Spec.Project != argoCDApp.Spec.Project {
+		specDiff = "spec project fields differ"
+	} else if !reflect.DeepEqual(specFieldAppFromDB.Spec.SyncPolicy, argoCDApp.Spec.SyncPolicy) {
+		specDiff = "sync policy fields differ"
+	}
+
+	return specDiff, nil
+
 }

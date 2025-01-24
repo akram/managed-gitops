@@ -18,7 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -31,8 +31,7 @@ func AppSync(ctx context.Context, appName string, revision string, namespaceName
 
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespaceName,
-			Name:      namespaceName,
+			Name: namespaceName,
 		},
 	}
 
@@ -56,7 +55,7 @@ func AppSync(ctx context.Context, appName string, revision string, namespaceName
 }
 
 func appSync(ctx context.Context, acdClient argocdclient.Client, appName string, dryRun bool, replace bool, revision string, prune bool,
-	strategy string, force bool, async bool, timeout uint, retryLimit int64, retryBackoffDuration time.Duration,
+	strategy string, force bool, async bool, timeout int, retryLimit int64, retryBackoffDuration time.Duration,
 	retryBackoffMaxDuration time.Duration, retryBackoffFactor int64) error {
 
 	conn, appIf, err := acdClient.NewApplicationClient()
@@ -107,7 +106,7 @@ func appSync(ctx context.Context, acdClient argocdclient.Client, appName string,
 			Backoff: &argoappv1.Backoff{
 				Duration:    retryBackoffDuration.String(),
 				MaxDuration: retryBackoffMaxDuration.String(),
-				Factor:      pointer.Int64Ptr(retryBackoffFactor),
+				Factor:      ptr.To(retryBackoffFactor),
 			},
 		}
 	}
@@ -174,7 +173,7 @@ func (rs *resourceState) merge(newState *resourceState) bool {
 	return updated
 }
 
-func waitOnApplicationStatus(parentContext context.Context, acdClient argocdclient.Client, appName string, timeout uint, watchSync bool,
+func waitOnApplicationStatus(parentContext context.Context, acdClient argocdclient.Client, appName string, timeout int, watchSync bool,
 	watchHealth bool, watchOperation bool, watchSuspended bool,
 	selectedResources []argoappv1.SyncOperationResource) (*argoappv1.Application, error) {
 

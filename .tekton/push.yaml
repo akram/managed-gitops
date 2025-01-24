@@ -15,18 +15,27 @@ spec:
       value: "{{ revision }}"
     - name: output-image
       value: 'quay.io/redhat-appstudio/gitops-service:{{ revision }}'
-    - name: path-context
-      value: .
-    - name: dockerfile
-      value: Dockerfile
     - name: infra-deployment-update-script
       value: |
-        sed -i -e 's|\(https://raw.githubusercontent.com/redhat-appstudio/managed-gitops/\)[^/]*\(/.*\)|\1{{ revision }}\2|' -e 's/\(newTag: \).*/\1{{ revision }}/' components/gitops/staging/kustomization.yaml
+        sed -i -E 's/[0-9a-f]{40}/$(params.revision)/g' components/gitops/staging/base/kustomization.yaml
+        sed -i -E 's/[0-9a-f]{40}/$(params.revision)/g' components/gitops/production/base/kustomization.yaml
+        sed -i -E 's/[0-9a-f]{40}/$(params.revision)/g' components/gitops/development/kustomization.yaml
   pipelineRef:
-    name: docker-build
-    bundle: quay.io/redhat-appstudio/hacbs-core-service-templates-bundle:latest
+    params:
+      - name: bundle
+        value: >-
+          quay.io/redhat-appstudio-tekton-catalog/pipeline-core-services-docker-build:latest
+      - name: name
+        value: docker-build
+      - name: kind
+        value: Pipeline
+    resolver: bundles
   workspaces:
     - name: workspace
-      persistentVolumeClaim:
-        claimName: app-studio-default-workspace
-      subPath: gitops-service-push-{{ revision }}
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
